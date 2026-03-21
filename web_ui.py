@@ -1180,6 +1180,8 @@ def run_pipeline(
             )
 
     cmd = [str(RESEARCHCLAW_CMD), "run", "--topic", combined, "--auto-approve"]
+    if protocol_file:
+        cmd += ["--protocol-file", protocol_file]
     if tmp_config:
         cmd += ["--config", str(tmp_config)]
 

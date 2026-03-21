@@ -327,6 +327,22 @@ class TestSpecificProtocols:
         assert p.maturity == Maturity.MVP
         assert p.requires_llm is False
 
+    def test_pptx_is_mvp_with_dedicated_generator(self):
+        """Presentación PowerPoint promoted from SPEC to MVP.
+
+        The pptx_generator module is fully tracked and tested; the UI panel
+        (pptx_panel) is already wired in web_ui.py.  This test locks the
+        promoted state so any accidental rollback is caught immediately.
+        """
+        p = get_protocol("presentacion_powerpoint")
+        assert p is not None
+        assert p.maturity == Maturity.MVP
+        assert p.has_dedicated_generator is True
+        assert p.generator_module == "researchclaw.pptx_generator"
+        assert p.has_ui_panel is True
+        assert p.ui_panel_id == "pptx_panel"
+        assert IOType.PPTX in p.outputs
+
 
 # ---------------------------------------------------------------------------
 # Summary table

@@ -311,9 +311,11 @@ REGISTRY: tuple[ProtocolDescriptor, ...] = (
         outputs=(IOType.PPTX,),
         requires_llm=True,
         requires_search=True,
+        has_dedicated_generator=True,
+        generator_module="researchclaw.pptx_generator",
         has_ui_panel=True,
         ui_panel_id="pptx_panel",
-        maturity=Maturity.SPEC,
+        maturity=Maturity.MVP,
         tags=("slides", "presentation", "dissemination"),
     ),
     ProtocolDescriptor(

@@ -197,6 +197,44 @@ class TestExtractSlotSentences(unittest.TestCase):
         if sents:
             self.assertNotIn("this section begins", sents[0].lower())
 
+    def test_methods_prefers_methodology_over_clinical_background(self):
+        """Methods should select search/PRISMA sentences, not disease descriptions."""
+        text = (
+            "Pediatric ulcerative colitis is a chronic inflammatory bowel disease "
+            "that affects the large intestine and rectum, leading to symptoms such "
+            "as abdominal pain, diarrhea, and rectal bleeding.\n"
+            "The current standard treatments include corticosteroids and "
+            "immunomodulators, making the search for safer alternatives a "
+            "pressing need.\n"
+            "A systematic search was conducted in PubMed, Cochrane Library, "
+            "and Scopus from inception to April 2023.\n"
+            "Inclusion criteria followed the PICOS framework with risk of bias "
+            "assessed using the Cochrane Risk of Bias 2 tool."
+        )
+        sents = _extract_slot_sentences(text, "methods", max_sentences=2)
+        all_text = " ".join(sents).lower()
+        # Must contain actual methodology
+        self.assertTrue(
+            "pubmed" in all_text or "cochrane" in all_text or "picos" in all_text,
+            f"Methods should contain methodology terms, got: {sents}"
+        )
+        # Must NOT contain clinical background
+        self.assertNotIn("chronic inflammatory", all_text)
+        self.assertNotIn("abdominal pain", all_text)
+
+    def test_methods_non_methodological_search_deprioritized(self):
+        """'the search for safer alternatives' should not score as methodology."""
+        text = (
+            "The search for safer natural alternatives is a pressing clinical need "
+            "that motivates ongoing investigation in complementary medicine.\n"
+            "A systematic search of MEDLINE and Embase was performed using "
+            "predefined search terms and Boolean operators."
+        )
+        sents = _extract_slot_sentences(text, "methods", max_sentences=1)
+        if sents:
+            self.assertIn("medline", sents[0].lower(),
+                          f"Should pick the database search, got: {sents[0]}")
+
 
 # ---------------------------------------------------------------------------
 # Tests for _enforce_word_budget

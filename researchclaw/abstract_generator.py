@@ -113,7 +113,11 @@ def _extract_slot_sentences(
         if findings:
             return findings
 
-    sentences = _extract_sentences(text, max_count=max_sentences * 2)
+    # For Methods we need a much larger candidate pool because the real
+    # methodology sentences may appear deep in the text (e.g. after a
+    # "Problem Formulation" preamble).  Other slots use a modest pool.
+    pool_size = max_sentences * 8 if slot == "methods" else max_sentences * 3
+    sentences = _extract_sentences(text, max_count=pool_size)
 
     # For non-Results slots, apply light scoring to prefer informative sentences
     if slot == "background":
@@ -149,24 +153,75 @@ def _extract_slot_sentences(
         sentences = [s for _, s in scored]
 
     elif slot == "methods":
-        # Prefer sentences about search strategy, criteria, design
+        # Strong scoring to separate methodology from clinical background.
+        # The "Problem Formulation" subsection often leaks disease descriptions
+        # (symptoms, treatments, epidemiology) into the Methods slot.
         scored = []
         for s in sentences:
             score = 0.0
             sl = s.lower()
-            if re.search(r"\b(search|database|pubmed|cochrane|scopus|medline)\b", sl):
-                score += 2.5
-            if re.search(r"\b(inclusion|exclusion|eligib|criteria|PICOS|PRISMA)\b", sl, re.I):
-                score += 2.5
-            if re.search(r"\b(randomized|controlled|trial|RCT|cohort|study design)\b", sl, re.I):
+
+            # --- Strong positive: actual methodology ---
+            # Databases and search (require methodological context for "search")
+            if re.search(r"\b(database|pubmed|cochrane|scopus|medline|embase|web\s+of\s+science)\b", sl):
+                score += 4.0
+            # "search" only counts when paired with methodology context
+            if re.search(r"\b(systematic\s+search|search\s+(strateg|was\s+conducted|of\s+(pubmed|cochrane|scopus|medline|embase|the\s+literature)))\b", sl):
+                score += 4.0
+            elif re.search(r"\bsearch(ed)?\b", sl) and re.search(r"\b(database|pubmed|cochrane|scopus|medline)\b", sl):
+                score += 3.0
+            # Review framework and guidelines
+            if re.search(r"\b(PRISMA|PICOS|PROSPERO|MOOSE|Cochrane\s+Handbook)\b", s):
+                score += 4.0
+            # Eligibility and screening
+            if re.search(r"\b(inclusion|exclusion|eligib|screen(ed|ing)|full.text\s+review)\b", sl):
+                score += 3.5
+            # Quality assessment tools
+            if re.search(r"\b(risk.of.bias|RoB\s*2|ROBINS|Newcastle.Ottawa|JBI|GRADE|quality\s+assess)\b", sl, re.I):
+                score += 3.5
+            # Data extraction and synthesis
+            if re.search(r"\b(data\s+extract|meta.analysis|random.effects|fixed.effects|heterogeneity|I\^?2|forest\s+plot)\b", sl, re.I):
+                score += 3.0
+            # Study design language
+            if re.search(r"\b(RCT|randomized|controlled\s+trial|cohort|case.control|cross.sectional)\b", sl, re.I):
                 score += 2.0
-            if re.search(r"\b(risk.of.bias|quality|Newcastle|Cochrane)\b", sl, re.I):
-                score += 1.5
-            # Deprioritize meta-sentences about the paper structure
+            # Review process language
+            if re.search(r"\b(independent\s+reviewer|inter.rater|kappa|duplicate|blind(ed)?)\b", sl):
+                score += 2.0
+            # Date ranges typical of search strategies
+            if re.search(r"\b(inception|from\s+\d{4}\s+to|through\s+(January|February|March|April|May|June|July|August|September|October|November|December))\b", sl, re.I):
+                score += 2.5
+
+            # --- Moderate positive: method-adjacent ---
+            if re.search(r"\b(population|intervention|comparator|outcome|study\s+design)\b", sl):
+                score += 1.0
+
+            # --- Strong negative: clinical/disease background ---
+            # Disease descriptions (belong in Background, not Methods)
+            if re.search(r"\b(chronic|inflammatory|bowel\s+disease|characterized\s+by|symptom|diarrhea|bleeding|abdominal\s+pain)\b", sl):
+                score -= 4.0
+            # Treatment descriptions (belong in Background)
+            if re.search(r"\b(corticosteroid|immunomodulator|biologic|side\s+effect|adverse|conventional\s+treat)\b", sl):
+                score -= 3.0
+            # Epidemiology (belong in Background)
+            if re.search(r"\b(prevalence|incidence|worldwide|children\s+aged|peak\s+incidence|1\s+in\s+\d)\b", sl):
+                score -= 3.0
+            # Problem framing language (belong in Background/Objectives)
+            if re.search(r"\b(pressing\s+need|knowledge\s+gap|poorly\s+understood|remains?\s+unclear)\b", sl):
+                score -= 3.0
+            # Non-methodological "search" (e.g. "the search for safer alternatives")
+            if re.search(r"\bthe\s+search\s+for\s+(safer|better|new|novel|alternative|effective)\b", sl):
+                score -= 4.0
+            # Generic definitions
+            if re.search(r"\b(the\s+first\s+step\s+is|is\s+defined\s+as|is\s+a\s+chronic|is\s+measured\s+by)\b", sl):
+                score -= 4.0
+
+            # --- Strong negative: meta-sentences about paper structure ---
             if re.search(r"\b(this\s+section\s+(begins|describes|details|presents|outlines))\b", sl):
                 score -= 5.0
             if re.search(r"\b(section\s+\d|described\s+(below|above|in\s+the))\b", sl):
                 score -= 3.0
+
             scored.append((score, s))
         scored.sort(key=lambda x: x[0], reverse=True)
         sentences = [s for _, s in scored]
@@ -313,9 +368,11 @@ def generate_abstract(
         target = _SLOT_SENTENCE_TARGETS[slot]
         # Extract more candidates, then trim
         sents = _extract_slot_sentences(combined, slot, max_sentences=target + 2)
-        # Clean citations and markdown, ensure proper sentence endings
+        # Clean citations, markdown, and bullet-list fragments
         sents = [_strip_citations(s) for s in sents]
         sents = [re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", s) for s in sents]
+        # Truncate at colon followed by newline+bullet (e.g. "criteria:\n- Pop...")
+        sents = [re.split(r":\s*\n\s*-\s", s)[0] + "." if re.search(r":\s*\n\s*-\s", s) else s for s in sents]
         sents = [s.strip() for s in sents]
         # Ensure each sentence ends with a period
         sents = [s if s.endswith((".", "!", "?")) else s + "." for s in sents]

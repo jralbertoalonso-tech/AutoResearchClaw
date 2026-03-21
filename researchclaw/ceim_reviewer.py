@@ -45,6 +45,32 @@ class StudyType(Enum):
     UNKNOWN = "unknown"
 
 
+def _is_systematic_review(text: str) -> bool:
+    """Detect if the text describes a systematic review or meta-analysis."""
+    tl = text.lower()
+    sr_keywords = [
+        "systematic review", "revisión sistemática",
+        "meta-analysis", "meta-análisis", "metaanálisis",
+        "prisma", "prospero", "scoping review",
+        "revisión de alcance",
+    ]
+    return sum(1 for k in sr_keywords if k in tl) >= 2
+
+
+# Items not applicable to systematic reviews (no direct participants).
+_SR_NA_ITEMS: frozenset[str] = frozenset([
+    "B2",  # Sample size calculation — SR aggregates existing studies
+    "B4",  # Safety/SAE plan — SR doesn't administer interventions
+    "C1",  # Informed consent — no direct participants
+    "C2",  # Patient information sheet — no direct participants
+    "C3",  # Data protection RGPD — SR uses published aggregate data
+    "C4",  # Liability insurance — no direct participants
+    "D1",  # Monitoring / quality control of interventions
+    "D2",  # Early stopping criteria
+    "D4",  # Biological samples
+])
+
+
 _QUALITATIVE_KEYWORDS = frozenset([
     "cualitativ", "qualitative", "fenomenolog", "phenomenolog",
     "etnograf", "ethnograph", "grounded theory", "teoría fundamentada",
@@ -220,7 +246,8 @@ _OBSERVATIONAL_CHECKLIST: list[dict] = [
      "desc": "Título completo y registro del estudio",
      "critical": True,
      "positive_kw": ["clinicaltrials", "eudract", "ctis", "isrctn", "registro",
-                     "registry", "código de protocolo", "protocol code"],
+                     "registry", "código de protocolo", "protocol code",
+                     "prospero", "crd42"],
      "section": "title"},
     {"id": "A2", "cat": "Identificación y Diseño",
      "desc": "Justificación científica con gap de conocimiento explícito",
@@ -459,10 +486,109 @@ _QUALITATIVE_CHECKLIST: list[dict] = [
 # Keyword presence detector
 # ---------------------------------------------------------------------------
 
-def _detect_keywords(text: str, keywords: list[str]) -> list[str]:
-    """Return which keywords are found in the text (case-insensitive)."""
+# Patterns that negate a keyword when they appear BEFORE it.
+# These are matched against the window that INCLUDES up to the keyword start,
+# so the keyword itself may be the next word after the negation phrase.
+_NEGATION_PRE: list[re.Pattern[str]] = [
+    # Spanish
+    re.compile(r"\bno\s+(se\s+)?(obtuvo|proporcionó|describe|reportó|incluyó|"
+               r"realizó|especifica|menciona|aplica|existe|presenta|dispone)\b"),
+    re.compile(r"\bsin\s+(el|la|los|las)\s+$"),  # "sin la " right before keyword
+    re.compile(r"\bsin\s+$"),                      # "sin " right before keyword
+    re.compile(r"\bno\s+se\s+ha(n)?\s+(obtenido|proporcionado|descrito|incluido|"
+               r"realizado|especificado|mencionado|presentado)\b"),
+    re.compile(r"\bausencia\s+de\s+$"),            # "ausencia de " right before keyword
+    re.compile(r"\bausencia\s+de\b"),
+    # English
+    re.compile(r"\bwithout\s+(the\s+)?$"),         # "without " right before keyword
+    re.compile(r"\babsence\s+of\s+$"),
+    re.compile(r"\babsence\s+of\b"),
+    re.compile(r"\bdid\s+not\b"),
+    re.compile(r"\bnot\s+\w+ed\b"),                # "not obtained", "not provided"
+]
+
+# Patterns that negate a keyword when they appear AFTER it
+_NEGATION_POST: list[re.Pattern[str]] = [
+    re.compile(r"\bwas\s+not\s+(obtained|provided|described|reported|included|"
+               r"available|applicable|mentioned|performed|conducted)\b"),
+    re.compile(r"\bwere\s+not\s+(obtained|provided|described)\b"),
+    re.compile(r"\bno\s+(fue|fueron)\s+(obtenid|proporcionad|descrit|incluid|"
+               r"realizad|especificad|mencionad)\w*\b"),
+]
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _get_sentence_around(text: str, pos: int) -> tuple[str, str]:
+    """Return (pre, post) text within the same sentence as position *pos*."""
+    # Find sentence start: look backwards for sentence boundary
+    search_start = max(0, pos - 200)
+    segment = text[search_start:pos]
+    # Find last sentence boundary in the segment
+    boundaries = list(_SENTENCE_SPLIT.finditer(segment))
+    if boundaries:
+        sent_start = search_start + boundaries[-1].end()
+    else:
+        sent_start = search_start
+
+    # Find sentence end: look forwards for sentence boundary
+    search_end = min(len(text), pos + 200)
+    segment_post = text[pos:search_end]
+    m = _SENTENCE_SPLIT.search(segment_post)
+    sent_end = pos + m.start() if m else search_end
+
+    pre = text[sent_start:pos]
+    post = text[pos:sent_end]
+    return pre, post
+
+
+def _is_negated(text: str, keyword: str) -> bool:
+    """Check if a keyword appears only in negated contexts.
+
+    Uses sentence-level scope to avoid cross-sentence false positives.
+    """
     tl = text.lower()
-    return [k for k in keywords if k in tl]
+    kl = keyword.lower()
+    # Find all positions where the keyword appears
+    start = 0
+    positions = []
+    while True:
+        idx = tl.find(kl, start)
+        if idx == -1:
+            break
+        positions.append(idx)
+        start = idx + 1
+
+    if not positions:
+        return False
+
+    # Check each occurrence — if ANY occurrence is non-negated, return False
+    for pos in positions:
+        pre_window, post_window = _get_sentence_around(tl, pos)
+        # post_window starts at keyword; we only want text after keyword
+        post_after_kw = post_window[len(kl):]
+
+        negated_pre = any(p.search(pre_window) for p in _NEGATION_PRE)
+        negated_post = any(p.search(post_after_kw) for p in _NEGATION_POST)
+
+        if not negated_pre and not negated_post:
+            return False  # At least one non-negated occurrence
+
+    return True  # All occurrences are negated
+
+
+def _detect_keywords(text: str, keywords: list[str]) -> list[str]:
+    """Return which keywords are found in the text (case-insensitive).
+
+    Filters out keywords that appear only in negated contexts.
+    """
+    tl = text.lower()
+    found = []
+    for k in keywords:
+        if k in tl and not _is_negated(text, k):
+            found.append(k)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +923,15 @@ def generate_ceim_review(
     else:
         # Observational / biomedical / unknown
         checklist_items = _evaluate_checklist(slot_texts, protocol_md, _OBSERVATIONAL_CHECKLIST)
+
+    # 6b. Mark N/A items for systematic reviews
+    is_sr = _is_systematic_review(protocol_md)
+    if is_sr:
+        for item in checklist_items:
+            if item.id in _SR_NA_ITEMS and item.status in ("❌", "⚠️"):
+                item.status = "N/A"
+                item.finding = "No aplica a revisiones sistemáticas (sin participantes directos)"
+                item.recommendation = ""
 
     # 7. Ethical considerations
     ethical = _extract_ethical_considerations(protocol_md)

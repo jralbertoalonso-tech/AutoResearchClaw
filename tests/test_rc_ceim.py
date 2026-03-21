@@ -34,6 +34,9 @@ from researchclaw.ceim_reviewer import (
     _compute_recommendation,
     _OBSERVATIONAL_CHECKLIST,
     _QUALITATIVE_CHECKLIST,
+    _is_systematic_review,
+    _is_negated,
+    _SR_NA_ITEMS,
 )
 
 
@@ -647,6 +650,151 @@ class TestEdgeCases(unittest.TestCase):
         n_fail = sum(1 for i in review.checklist if i.status == "❌")
         # Most items should fail for a minimal protocol
         self.assertGreater(n_fail, len(review.checklist) // 2)
+
+
+# ---------------------------------------------------------------------------
+# Tests for systematic review N/A detection
+# ---------------------------------------------------------------------------
+
+_SR_PROTOCOL = """\
+## Title
+Efficacy of Curcumin in Pediatric UC: A Systematic Review and Meta-Analysis
+
+## Introduction
+This systematic review follows PRISMA 2020 guidelines. The protocol
+was registered in PROSPERO (CRD42023456789). There is limited evidence
+on the use of curcumin in pediatric populations, representing a gap
+in current knowledge that needs to be addressed.
+
+## Objectives
+The primary objective is to evaluate the efficacy of curcumin.
+The primary outcome is clinical remission rate.
+
+## Methods
+### Search Strategy
+A systematic search was conducted in PubMed, Cochrane, and Scopus.
+Eligibility criteria were pre-defined. Studies were screened
+by two independent reviewers. Risk of bias was assessed using
+the Cochrane Risk of Bias 2 tool.
+
+### Statistical Analysis
+Meta-analysis was performed with random-effects models.
+Heterogeneity was assessed using I² statistics.
+
+## Results
+Twelve RCTs met the inclusion criteria.
+
+## Discussion
+The findings suggest curcumin may be beneficial.
+
+## Limitations
+Limited number of studies. Publication bias possible.
+
+## Conclusions
+More research is needed.
+"""
+
+
+class TestIsSystematicReview(unittest.TestCase):
+
+    def test_sr_detected(self):
+        self.assertTrue(_is_systematic_review(_SR_PROTOCOL))
+
+    def test_qualitative_not_sr(self):
+        self.assertFalse(_is_systematic_review(_QUALITATIVE_PROTOCOL))
+
+    def test_minimal_not_sr(self):
+        self.assertFalse(_is_systematic_review(_MINIMAL_PROTOCOL))
+
+
+class TestSRNAItems(unittest.TestCase):
+
+    def test_sr_marks_na_on_inapplicable_items(self):
+        review = generate_ceim_review(_SR_PROTOCOL)
+        na_ids = {i.id for i in review.checklist if i.status == "N/A"}
+        # B2 (sample size), C1 (consent), C2 (HIP), C3 (RGPD),
+        # C4 (insurance), D1 (monitoring), D2 (stopping), D4 (samples)
+        for expected_na in ["B2", "C1", "C2", "C3", "C4", "D1", "D2", "D4"]:
+            self.assertIn(expected_na, na_ids,
+                         f"{expected_na} should be N/A for systematic review")
+
+    def test_sr_keeps_applicable_items(self):
+        review = generate_ceim_review(_SR_PROTOCOL)
+        # A2, A3, A4, B1 should NOT be N/A
+        na_ids = {i.id for i in review.checklist if i.status == "N/A"}
+        for should_stay in ["A2", "A3", "A4", "B1"]:
+            self.assertNotIn(should_stay, na_ids,
+                            f"{should_stay} should still be evaluated for SR")
+
+    def test_sr_prospero_detected(self):
+        """PROSPERO registration should make A1 non-failing."""
+        review = generate_ceim_review(_SR_PROTOCOL)
+        a1 = next(i for i in review.checklist if i.id == "A1")
+        self.assertNotEqual(a1.status, "❌",
+                           f"A1 should detect PROSPERO, got: {a1.status}")
+
+    def test_sr_recommendation_improves(self):
+        """SR should get better recommendation than REVISIÓN MAYOR."""
+        review = generate_ceim_review(_SR_PROTOCOL)
+        self.assertNotEqual(review.recommendation, "REVISIÓN MAYOR NECESARIA",
+                           f"SR should not get worst recommendation")
+
+    def test_non_sr_not_affected(self):
+        """Non-SR protocols should not get N/A items from SR logic."""
+        review = generate_ceim_review(_QUALITATIVE_PROTOCOL)
+        na_ids = {i.id for i in review.checklist if i.status == "N/A"}
+        # Qualitative checklist has Q-items, no A/B/C/D items to mark N/A
+        sr_na_in_result = na_ids & _SR_NA_ITEMS
+        self.assertEqual(len(sr_na_in_result), 0)
+
+
+# ---------------------------------------------------------------------------
+# Tests for negation detection
+# ---------------------------------------------------------------------------
+
+class TestNegationDetection(unittest.TestCase):
+
+    def test_spanish_negation(self):
+        text = "No se obtuvo consentimiento informado de los participantes."
+        self.assertTrue(_is_negated(text, "consentimiento informado"))
+
+    def test_spanish_sin(self):
+        text = "El estudio se realizó sin la aprobación del comité de ética."
+        self.assertTrue(_is_negated(text, "aprobación"))
+
+    def test_english_not(self):
+        text = "Informed consent was not obtained from participants."
+        self.assertTrue(_is_negated(text, "informed consent"))
+
+    def test_english_without(self):
+        text = "The study proceeded without ethical approval."
+        self.assertTrue(_is_negated(text, "ethical"))
+
+    def test_non_negated_positive(self):
+        text = "Written informed consent was obtained from all participants."
+        self.assertFalse(_is_negated(text, "informed consent"))
+
+    def test_mixed_positive_and_negative(self):
+        """If keyword appears both negated and non-negated, it's non-negated."""
+        text = ("Initially, consent was not obtained. "
+                "Later, informed consent was obtained from all participants.")
+        self.assertFalse(_is_negated(text, "consent"))
+
+    def test_absence_of(self):
+        text = "The absence of data protection measures is concerning."
+        self.assertTrue(_is_negated(text, "data protection"))
+
+    def test_negation_affects_detect_keywords(self):
+        """_detect_keywords should exclude negated keywords."""
+        text = "No se obtuvo consentimiento informado. El diseño es observacional."
+        found = _detect_keywords(text, ["consentimiento informado", "observacional"])
+        self.assertIn("observacional", found)
+        self.assertNotIn("consentimiento informado", found)
+
+    def test_detect_keywords_keeps_non_negated(self):
+        text = "Se obtuvo consentimiento informado de todos los participantes."
+        found = _detect_keywords(text, ["consentimiento informado"])
+        self.assertIn("consentimiento informado", found)
 
 
 if __name__ == "__main__":

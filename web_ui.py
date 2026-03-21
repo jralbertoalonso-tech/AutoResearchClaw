@@ -1051,7 +1051,15 @@ def _run_ceim_dossier(
         tmp_dir = Path(tempfile.mkdtemp(prefix="ceim_dossier_"))
         write_dossier(dossier, tmp_dir)
 
-        # Create zip
+        # Optional: generate DOCX versions alongside the Markdown files.
+        # Silently skipped if python-docx is not installed.
+        try:
+            from researchclaw.ceim_dossier import export_dossier_docx
+            export_dossier_docx(dossier, tmp_dir)
+        except Exception:
+            pass  # DOCX export is optional; ZIP always contains .md files
+
+        # Create zip (picks up both .md and .docx files if present)
         import zipfile
         zip_path = tmp_dir.parent / f"ceim_dossier_{title[:30].replace(' ', '_')}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:

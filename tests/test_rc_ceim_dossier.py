@@ -20,10 +20,18 @@ from researchclaw.ceim_dossier import (
     _ph,
     _PH,
     _screen_eipd,
+    export_dossier_docx,
     generate_dossier,
     write_dossier,
 )
 from researchclaw.ceim_reviewer import StudyType
+
+# python-docx availability flag (mirrors pattern from test_rc_exporters.py)
+try:
+    import docx as _docx_lib  # noqa: F401
+    _DOCX_AVAILABLE = True
+except ImportError:
+    _DOCX_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -1031,3 +1039,147 @@ class TestEdgeCases:
         assert "Criterion 19" in protocol
         hip = d.documents["hip"]
         assert "Risk 14" in hip
+
+
+# ---------------------------------------------------------------------------
+# Tests — export_dossier_docx
+# ---------------------------------------------------------------------------
+
+
+class TestExportDossierDocxImportGuard:
+    """export_dossier_docx must raise a clear ImportError when python-docx
+    is absent.  This test always runs regardless of installed deps."""
+
+    def test_raises_import_error_without_python_docx(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "docx", None)
+        p = _minimal_profile()
+        d = generate_dossier(p)
+        with pytest.raises(ImportError):
+            export_dossier_docx(d, tmp_path / "out")
+
+
+@pytest.mark.skipif(not _DOCX_AVAILABLE, reason="python-docx not installed")
+class TestExportDossierDocx:
+    """Integration tests for export_dossier_docx — require python-docx."""
+
+    # ── File creation ───────────────────────────────────────────────────────
+
+    def test_produces_one_docx_per_document(self, tmp_path: Path) -> None:
+        p = _full_observational_profile()
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        assert len(paths) == len(d.documents)
+        for doc_name, path in paths.items():
+            assert path.exists(), f"DOCX for '{doc_name}' was not created"
+
+    def test_all_docx_files_non_empty(self, tmp_path: Path) -> None:
+        p = _full_observational_profile()
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        for doc_name, path in paths.items():
+            size = path.stat().st_size
+            assert size > 0, f"DOCX for '{doc_name}' is empty"
+
+    def test_returns_correct_output_dir(self, tmp_path: Path) -> None:
+        p = _minimal_profile()
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        for path in paths.values():
+            assert path.parent == tmp_path
+
+    def test_creates_output_dir_automatically(self, tmp_path: Path) -> None:
+        p = _minimal_profile()
+        d = generate_dossier(p)
+        new_dir = tmp_path / "deep" / "nested"
+        assert not new_dir.exists()
+        export_dossier_docx(d, new_dir)
+        assert new_dir.exists()
+
+    # ── Naming convention ───────────────────────────────────────────────────
+
+    def test_docx_filenames_match_expected_scheme(self, tmp_path: Path) -> None:
+        """DOCX files must use the 01_, 02_, … prefix convention."""
+        p = _full_observational_profile()
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        names = {path.name for path in paths.values()}
+        assert "01_protocolo.docx" in names
+        assert "02_hoja_informacion_paciente.docx" in names
+        assert "03_consentimiento_informado.docx" in names
+        assert "05_proteccion_datos.docx" in names
+
+    def test_assent_docx_produced_when_minors(self, tmp_path: Path) -> None:
+        p = _full_observational_profile()
+        p.has_minors = True
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        assert "assent" in paths
+        assert paths["assent"].name == "04_asentimiento_menores.docx"
+
+    def test_samples_annex_docx_produced_when_samples(self, tmp_path: Path) -> None:
+        p = _full_observational_profile()
+        p.has_biological_samples = True
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        assert "samples_annex" in paths
+        assert paths["samples_annex"].name == "06_anexo_muestras_biologicas.docx"
+
+    def test_full_dossier_six_docx_files(self, tmp_path: Path) -> None:
+        """All six documents present when minors + samples enabled."""
+        p = _mixed_profile_with_minors_and_samples()
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        assert len(paths) == 6
+
+    # ── DOCX validity ───────────────────────────────────────────────────────
+
+    def test_docx_files_are_valid_zip_archives(self, tmp_path: Path) -> None:
+        """DOCX is a ZIP container — every file must be a valid archive."""
+        import zipfile
+
+        p = _full_observational_profile()
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        for doc_name, path in paths.items():
+            assert zipfile.is_zipfile(path), (
+                f"DOCX for '{doc_name}' is not a valid ZIP/DOCX archive"
+            )
+
+    # ── Coexistence with write_dossier ──────────────────────────────────────
+
+    def test_md_and_docx_coexist_in_same_dir(self, tmp_path: Path) -> None:
+        """write_dossier and export_dossier_docx can safely share a directory."""
+        p = _full_observational_profile()
+        d = generate_dossier(p)
+        write_dossier(d, tmp_path)
+        export_dossier_docx(d, tmp_path)
+
+        files = list(tmp_path.iterdir())
+        md_files   = [f for f in files if f.suffix == ".md"]
+        docx_files = [f for f in files if f.suffix == ".docx"]
+        assert len(md_files)   == len(d.documents)
+        assert len(docx_files) == len(d.documents)
+
+    # ── Profile data reflected in output ────────────────────────────────────
+
+    def test_protocol_code_used_in_short_title(self, tmp_path: Path) -> None:
+        """When a protocol code is provided, the DOCX footer should reference it.
+        We cannot inspect the footer text directly, but we verify generation
+        does not fail and the file is produced (coverage of the short_title path)."""
+        p = _full_observational_profile()
+        p.protocol_code = "EST-2024-001"
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        assert paths["protocol"].exists()
+
+    def test_empty_protocol_code_uses_label_only(self, tmp_path: Path) -> None:
+        """When protocol_code is empty, short_title falls back to the label."""
+        p = _minimal_profile()
+        p.protocol_code = ""
+        d = generate_dossier(p)
+        paths = export_dossier_docx(d, tmp_path)
+        assert paths["protocol"].exists()

@@ -1275,3 +1275,92 @@ def write_dossier(dossier: CEImDossier, output_dir: Path) -> dict[str, Path]:
         paths[doc_name] = path
 
     return paths
+
+
+# Parallel filename map for DOCX output — mirrors write_dossier numbering.
+_DOCX_FILENAMES: dict[str, str] = {
+    "protocol":        "01_protocolo.docx",
+    "hip":             "02_hoja_informacion_paciente.docx",
+    "ci":              "03_consentimiento_informado.docx",
+    "assent":          "04_asentimiento_menores.docx",
+    "data_protection": "05_proteccion_datos.docx",
+    "samples_annex":   "06_anexo_muestras_biologicas.docx",
+}
+
+# Short labels used in the DOCX footer (left column) for each document type.
+_DOCX_SHORT_LABELS: dict[str, str] = {
+    "protocol":        "Protocolo",
+    "hip":             "HIP",
+    "ci":              "Consentimiento",
+    "assent":          "Asentimiento",
+    "data_protection": "Protecc. Datos",
+    "samples_annex":   "Anexo Muestras",
+}
+
+
+def export_dossier_docx(
+    dossier: CEImDossier,
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Export each dossier document as an individual Word (.docx) file.
+
+    Generates one ``.docx`` per document using :func:`generate_docx
+    <researchclaw.docx_generator.generate_docx>`.  Files are numbered with
+    the same ``01_``, ``02_`` … prefix scheme as :func:`write_dossier` so
+    they sort consistently when both formats are present in the same
+    directory (e.g. inside a ZIP archive).
+
+    Each document is formatted as a standard academic document (not the
+    CEIm audit-review format) because the dossier documents are study
+    protocols, informed-consent sheets, etc. — not audit reports.
+
+    Parameters
+    ----------
+    dossier:
+        The :class:`CEImDossier` returned by :func:`generate_dossier`.
+    output_dir:
+        Directory where the ``.docx`` files are written.  Created
+        automatically if it does not exist.
+
+    Returns
+    -------
+    dict[str, Path]
+        Mapping of document name (e.g. ``"protocol"``, ``"hip"``) to the
+        absolute path of the generated ``.docx`` file.
+
+    Raises
+    ------
+    ImportError
+        When ``python-docx`` is not installed.  Install with
+        ``pip install "researchclaw[export]"`` or ``pip install python-docx``.
+    """
+    # Lazy import — python-docx is an optional dependency.
+    # The ImportError from generate_docx propagates unchanged so that the
+    # caller receives a clear message with the install hint.
+    from researchclaw.docx_generator import generate_docx  # type: ignore[import]
+
+    title       = dossier.profile.title or "Dossier CEIm"
+    code        = dossier.profile.protocol_code or ""
+    version_str = f"Versión {dossier.profile.version}"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+
+    for doc_name, content in dossier.documents.items():
+        fname       = _DOCX_FILENAMES.get(doc_name, f"{doc_name}.docx")
+        output_path = output_dir / fname
+
+        short_label = _DOCX_SHORT_LABELS.get(doc_name, doc_name)
+        # Footer left column: "PROT-001 — HIP" (max ~40 chars)
+        short_title = f"{code} — {short_label}" if code else short_label
+
+        generate_docx(
+            content,
+            output_path,
+            title=title,
+            version=version_str,
+            short_title=short_title,
+        )
+        paths[doc_name] = output_path
+
+    return paths

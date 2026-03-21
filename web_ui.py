@@ -58,6 +58,14 @@ PROTOCOLS_DIR   = PROJECT_DIR / "protocols"
 CONFIG_YAML     = PROJECT_DIR / "config.yaml"
 RESEARCHCLAW_CMD = PROJECT_DIR / ".venv" / "bin" / "researchclaw"
 
+from researchclaw.protocol_registry import (
+    REGISTRY as _PROTOCOL_REGISTRY,
+    ProtocolFamily as _PFamily,
+    get_by_filename as _get_proto_by_filename,
+)
+
+# Legacy constants — kept for backward compat in run_pipeline() where the
+# pipeline still receives raw filenames.  New UI helpers use the registry.
 _PPTX_PROTOCOL    = "Presentacion_PowerPoint.md"
 _CEIM_PROTOCOL    = "Auditoria_Protocolo_CEIm.md"
 _POSTER_PROTOCOL  = "Poster_Congreso.md"
@@ -268,10 +276,37 @@ def _write_cloud_config(model: str, api_key: str) -> Path:
 # Helpers de protocolos
 # ---------------------------------------------------------------------------
 
-def _protocol_choices() -> list[str]:
-    if not PROTOCOLS_DIR.is_dir():
-        return []
-    return sorted(p.name for p in PROTOCOLS_DIR.glob("*.md"))
+def _protocol_choices() -> list[tuple[str, str]]:
+    """Build protocol dropdown choices from the registry.
+
+    Returns a list of (display_label, filename) tuples for Gradio Dropdown.
+    Protocols in the registry get their human-readable name; any .md files
+    not in the registry are included with their filename as fallback label.
+    """
+    # Collect registered protocols that have a file on disk
+    registered: list[tuple[str, str]] = []
+    registered_files: set[str] = set()
+    for desc in _PROTOCOL_REGISTRY:
+        if desc.filename and (PROTOCOLS_DIR / desc.filename).exists():
+            # Family emoji prefix for visual grouping
+            _family_icon = {
+                _PFamily.RESEARCH: "🔬",
+                _PFamily.CLINICAL: "🏥",
+                _PFamily.DISSEMINATION: "📢",
+                _PFamily.ETHICS: "🏛️",
+            }
+            icon = _family_icon.get(desc.family, "📋")
+            label = f"{icon} {desc.name}"
+            registered.append((label, desc.filename))
+            registered_files.add(desc.filename)
+
+    # Include any .md files NOT in registry (fallback for new/unknown files)
+    if PROTOCOLS_DIR.is_dir():
+        for p in sorted(PROTOCOLS_DIR.glob("*.md")):
+            if p.name not in registered_files:
+                registered.append((f"📋 {p.stem.replace('_', ' ')}", p.name))
+
+    return registered
 
 
 def _load_protocol(filename: str | None) -> str:
@@ -1080,9 +1115,9 @@ def run_pipeline(
 
     protocol_block, data_note = _process_files(uploaded_files)
     protocol_prefix = _load_protocol(protocol_file)
-    is_pptx_run    = protocol_file == _PPTX_PROTOCOL
-    is_ceim_run    = protocol_file == _CEIM_PROTOCOL
-    is_poster_run  = protocol_file == _POSTER_PROTOCOL
+    is_pptx_run    = _proto_has_panel(protocol_file, "pptx_panel")
+    is_ceim_run    = _is_ceim_protocol(protocol_file)
+    is_poster_run  = _proto_has_panel(protocol_file, "poster_logo_panel")
     # El póster se genera automáticamente cuando se activa el protocolo de póster
     if is_poster_run:
         want_poster = True
@@ -1401,8 +1436,15 @@ _MODEL_FRAGMENTS = {
     "llama":         ["llama3.1", "llama3", "llama2", "llama"],
 }
 
-_MEDICAL_PROTOCOLS = {"PRISMA", "PICO", "Seguridad", "Toxicidad", "Caso", "CARE"}
-_WRITING_PROTOCOLS = {"IMRaD", "Congreso", "Divulgacion", "Divulgación", "Familias", "PowerPoint", "Poster", "Póster"}
+# Protocol families for model recommendation — derived from registry
+_MEDICAL_FILENAMES: frozenset[str] = frozenset(
+    d.filename for d in _PROTOCOL_REGISTRY
+    if d.filename and d.family in (_PFamily.RESEARCH, _PFamily.CLINICAL)
+)
+_WRITING_FILENAMES: frozenset[str] = frozenset(
+    d.filename for d in _PROTOCOL_REGISTRY
+    if d.filename and d.family == _PFamily.DISSEMINATION
+)
 
 
 def _best_available(fragments: list[str], available: list[str]) -> str | None:
@@ -1429,8 +1471,8 @@ def _recommend_model(
     has_data_kw     = any(kw in idea_lower for kw in _KW_DATA)
     has_medical_kw  = any(kw in idea_lower for kw in _KW_MEDICAL)
     has_writing_kw  = any(kw in idea_lower for kw in _KW_WRITING)
-    is_medical_proto = bool(protocol and any(t in protocol for t in _MEDICAL_PROTOCOLS))
-    is_writing_proto = bool(protocol and any(t in protocol for t in _WRITING_PROTOCOLS))
+    is_medical_proto = bool(protocol and protocol in _MEDICAL_FILENAMES)
+    is_writing_proto = bool(protocol and protocol in _WRITING_FILENAMES)
 
     if has_data_file or has_data_kw:
         target_name   = "Qwen2.5-Coder"
@@ -1470,29 +1512,44 @@ def _recommend_model(
 # Visibilidad condicional del panel de presentación y banner CEIm
 # ---------------------------------------------------------------------------
 
+def _proto_has_panel(protocol: str | None, panel_id: str) -> bool:
+    """Check if the selected protocol has a specific UI panel via registry."""
+    if not protocol:
+        return False
+    desc = _get_proto_by_filename(protocol)
+    return desc is not None and desc.has_ui_panel and desc.ui_panel_id == panel_id
+
+
 def _pptx_visibility(protocol: str | None):
     """Devuelve un update para mostrar/ocultar el panel de parámetros de presentación."""
-    visible = protocol == _PPTX_PROTOCOL
-    return gr.update(visible=visible)
+    return gr.update(visible=_proto_has_panel(protocol, "pptx_panel"))
 
 
 def _poster_panel_visibility(protocol: str | None):
     """Muestra el panel de logos cuando se activa el protocolo de póster."""
-    return gr.update(visible=(protocol == _POSTER_PROTOCOL))
+    return gr.update(visible=_proto_has_panel(protocol, "poster_logo_panel"))
 
 
 def _poster_format_autoselect(protocol: str | None, current_formats: list[str]) -> list[str]:
     """Auto-activa 'Póster Congreso (.pptx)' cuando se selecciona el protocolo de póster."""
     _poster_fmt = "Póster Congreso (.pptx)"
-    if protocol == _POSTER_PROTOCOL:
+    if _proto_has_panel(protocol, "poster_logo_panel"):
         if _poster_fmt not in (current_formats or []):
             return list(current_formats or []) + [_poster_fmt]
     return current_formats or []
 
 
+def _is_ceim_protocol(protocol: str | None) -> bool:
+    """Check if the selected protocol is a CEIm/ethics protocol via registry."""
+    if not protocol:
+        return False
+    desc = _get_proto_by_filename(protocol)
+    return desc is not None and desc.family == _PFamily.ETHICS
+
+
 def _ceim_banner(protocol: str | None) -> str:
     """Devuelve HTML de aviso cuando se activa el modo CEIm."""
-    if protocol == _CEIM_PROTOCOL:
+    if _is_ceim_protocol(protocol):
         return (
             "<div style='background:#92400e;color:#ffffff;"
             "border-left:6px solid #fbbf24;"
@@ -1510,7 +1567,7 @@ def _ceim_banner(protocol: str | None) -> str:
 
 def _ceim_section_visibility(protocol: str | None):
     """Muestra la sección CEIm cuando se activa el protocolo CEIm."""
-    return gr.update(visible=(protocol == _CEIM_PROTOCOL))
+    return gr.update(visible=_is_ceim_protocol(protocol))
 
 
 # ---------------------------------------------------------------------------
@@ -1521,7 +1578,8 @@ _ollama_detected = _ollama_models()
 print(f"✅ MODELOS OLLAMA CARGADOS: {_ollama_detected}")
 
 _MODELS    = ["(Predeterminado)"] + _ollama_detected
-_PROTOCOLS = ["(Ninguno)"] + _protocol_choices()
+_NONE_CHOICE = "(Ninguno)"
+_PROTOCOLS = [(_NONE_CHOICE, _NONE_CHOICE)] + _protocol_choices()
 
 _AUDIENCES = [
     "Comité Científico / Congresos",
@@ -1579,7 +1637,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         protocol_dropdown = gr.Dropdown(
             label="📋 Protocolo Metodológico",
             choices=_PROTOCOLS,
-            value="(Ninguno)",
+            value=_NONE_CHOICE,
             scale=3,
         )
 
@@ -1960,7 +2018,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         c_model, c_api_key,
         logo_hosp, logo_univ, logo_cong,
     ):
-        eff_protocol = None if protocol in (None, "(Ninguno)") else protocol
+        eff_protocol = None if protocol in (None, _NONE_CHOICE) else protocol
         eff_model    = None if model in (None, "(Predeterminado)") else model
         yield from run_pipeline(
             idea, files, eff_protocol, eff_model,

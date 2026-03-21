@@ -19,6 +19,7 @@ from researchclaw.ceim_dossier import (
     _list_or_ph,
     _ph,
     _PH,
+    _screen_eipd,
     generate_dossier,
     write_dossier,
 )
@@ -557,7 +558,6 @@ class TestGenerateDataProtection:
 
     def test_eipd_obligatory_three_criteria(self):
         p = _mixed_profile_with_minors_and_samples()
-        # has_sensitive_data, has_ai_component, has_vulnerable/minors, has_international_transfer = 4 criteria
         doc = _generate_data_protection(p)
         assert "OBLIGATORIA" in doc
         assert "❌" in doc
@@ -565,7 +565,7 @@ class TestGenerateDataProtection:
     def test_eipd_criteria_details_listed(self):
         p = _mixed_profile_with_minors_and_samples()
         doc = _generate_data_protection(p)
-        assert "categorías especiales" in doc
+        assert "art. 9" in doc
         assert "nuevas tecnologías" in doc.lower() or "Nuevas tecnologías" in doc
         assert "vulnerables" in doc
         assert "Transferencia internacional" in doc
@@ -590,6 +590,218 @@ class TestGenerateDataProtection:
         doc = _generate_data_protection(p)
         assert "Transferencia internacional de datos" in doc
         assert "SCC" in doc or "Cláusulas Contractuales" in doc
+
+    def test_eipd_has_seven_criteria_rows(self):
+        p = _full_observational_profile()
+        doc = _generate_data_protection(p)
+        # Table should have 7 numbered criteria rows
+        for i in range(1, 8):
+            assert f"| {i} |" in doc
+
+    def test_eipd_shows_criteria_count(self):
+        p = _mixed_profile_with_minors_and_samples()
+        doc = _generate_data_protection(p)
+        assert "Criterios positivos" in doc
+
+    def test_art9_security_measures_for_sensitive(self):
+        p = _full_qualitative_profile()  # has_sensitive_data=True
+        doc = _generate_data_protection(p)
+        assert "Medidas de seguridad adicionales" in doc
+        assert "AES-256" in doc
+
+    def test_no_art9_security_for_simple(self):
+        p = _full_observational_profile()  # no sensitive, no samples
+        doc = _generate_data_protection(p)
+        assert "Medidas de seguridad adicionales" not in doc
+
+    def test_mitigations_section_present(self):
+        p = _full_qualitative_profile()
+        doc = _generate_data_protection(p)
+        assert "Medidas de mitigación recomendadas" in doc
+
+    def test_no_mitigations_for_clean_study(self):
+        p = _full_observational_profile()
+        doc = _generate_data_protection(p)
+        assert "medidas estándar de seudonimización" in doc
+
+    def test_art35_reference(self):
+        p = _full_observational_profile()
+        doc = _generate_data_protection(p)
+        assert "art. 35 RGPD" in doc
+
+
+# ---------------------------------------------------------------------------
+# Tests — _screen_eipd (EIPD screening logic)
+# ---------------------------------------------------------------------------
+
+class TestScreenEIPD:
+    def test_zero_criteria_clean_study(self):
+        p = _full_observational_profile()
+        r = _screen_eipd(p)
+        assert r["count"] == 0
+        assert r["result"] == "No requiere EIPD"
+        assert r["icon"] == "✅"
+        assert not r["large_scale_health"]
+
+    def test_one_criterion_recommended(self):
+        p = _minimal_profile(has_sensitive_data=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 1
+        assert r["result"] == "EIPD RECOMENDADA"
+        assert r["icon"] == "⚠️"
+
+    def test_two_criteria_still_recommended(self):
+        p = _minimal_profile(has_sensitive_data=True, has_ai_component=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 2
+        assert r["result"] == "EIPD RECOMENDADA"
+
+    def test_three_criteria_obligatory(self):
+        p = _minimal_profile(
+            has_sensitive_data=True,
+            has_ai_component=True,
+            has_minors=True,
+        )
+        r = _screen_eipd(p)
+        assert r["count"] == 3
+        assert r["result"] == "EIPD OBLIGATORIA"
+        assert r["icon"] == "❌"
+
+    def test_biological_samples_infer_art9(self):
+        """Biological samples → art. 9 sensitive data, even without has_sensitive_data."""
+        p = _minimal_profile(has_biological_samples=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 1
+        c1 = r["criteria"][0]
+        assert c1["present"] is True
+        assert "biológicos" in c1["detail"]
+
+    def test_both_sensitive_and_samples(self):
+        p = _minimal_profile(has_sensitive_data=True, has_biological_samples=True)
+        r = _screen_eipd(p)
+        c1 = r["criteria"][0]
+        assert c1["present"] is True
+        assert "salud" in c1["detail"] and "genéticos" in c1["detail"]
+
+    def test_large_scale_health_auto_obligatory(self):
+        """n≥500 + health data → EIPD obligatory regardless of other criteria."""
+        p = _minimal_profile(
+            has_sensitive_data=True,
+            estimated_sample_size=600,
+        )
+        r = _screen_eipd(p)
+        assert r["large_scale_health"] is True
+        assert r["result"] == "EIPD OBLIGATORIA"
+        # Only 1 criterion met, but large-scale rule triggers
+
+    def test_large_scale_below_threshold(self):
+        p = _minimal_profile(has_sensitive_data=True, estimated_sample_size=499)
+        r = _screen_eipd(p)
+        assert r["large_scale_health"] is False
+        assert r["result"] == "EIPD RECOMENDADA"
+
+    def test_large_scale_without_health_data(self):
+        """Large sample alone (without art. 9 data) doesn't trigger large-scale rule."""
+        p = _minimal_profile(estimated_sample_size=1000)
+        r = _screen_eipd(p)
+        assert r["large_scale_health"] is False
+        assert r["result"] == "No requiere EIPD"
+
+    def test_new_fields_profiling(self):
+        p = _minimal_profile(has_systematic_profiling=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 1
+        c2 = r["criteria"][1]
+        assert c2["present"] is True
+
+    def test_new_fields_data_linkage(self):
+        p = _minimal_profile(has_data_linkage=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 1
+        c6 = r["criteria"][5]
+        assert c6["present"] is True
+        assert "linkage" in c6["detail"]
+
+    def test_new_fields_automated_decisions(self):
+        p = _minimal_profile(has_automated_decisions=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 1
+        c7 = r["criteria"][6]
+        assert c7["present"] is True
+        assert "revisión humana" in c7["detail"]
+
+    def test_automated_decisions_distinct_from_ai(self):
+        """AI component and automated decisions are separate criteria."""
+        p = _minimal_profile(has_ai_component=True, has_automated_decisions=True)
+        r = _screen_eipd(p)
+        assert r["count"] == 2
+        c3 = r["criteria"][2]  # new technologies
+        c7 = r["criteria"][6]  # automated decisions
+        assert c3["present"] is True
+        assert c7["present"] is True
+
+    def test_seven_criteria_total(self):
+        p = _minimal_profile()
+        r = _screen_eipd(p)
+        assert len(r["criteria"]) == 7
+
+    def test_all_criteria_enabled(self):
+        p = StudyProfile(
+            has_sensitive_data=True,
+            has_systematic_profiling=True,
+            has_ai_component=True,
+            has_vulnerable=True,
+            has_international_transfer=True,
+            has_data_linkage=True,
+            has_automated_decisions=True,
+        )
+        r = _screen_eipd(p)
+        assert r["count"] == 7
+        assert r["result"] == "EIPD OBLIGATORIA"
+
+    def test_mitigations_encryption_for_art9(self):
+        p = _minimal_profile(has_sensitive_data=True)
+        r = _screen_eipd(p)
+        assert any("Cifrado" in m for m in r["mitigations"])
+
+    def test_mitigations_human_review_for_automated(self):
+        p = _minimal_profile(has_automated_decisions=True)
+        r = _screen_eipd(p)
+        assert any("revisión humana" in m for m in r["mitigations"])
+
+    def test_mitigations_xai_for_ai(self):
+        p = _minimal_profile(has_ai_component=True)
+        r = _screen_eipd(p)
+        assert any("explicabilidad" in m for m in r["mitigations"])
+
+    def test_mitigations_salvaguardas_for_vulnerable(self):
+        p = _minimal_profile(has_minors=True)
+        r = _screen_eipd(p)
+        assert any("salvaguardas" in m.lower() for m in r["mitigations"])
+
+    def test_mitigations_transfer_for_international(self):
+        p = _minimal_profile(has_international_transfer=True)
+        r = _screen_eipd(p)
+        assert any("SCC" in m for m in r["mitigations"])
+
+    def test_mitigations_linkage(self):
+        p = _minimal_profile(has_data_linkage=True)
+        r = _screen_eipd(p)
+        assert any("linkage" in m for m in r["mitigations"])
+
+    def test_no_mitigations_clean_study(self):
+        p = _minimal_profile()
+        r = _screen_eipd(p)
+        assert r["mitigations"] == []
+
+    def test_mixed_profile_full_screening(self):
+        """Integration: the full mixed profile should trigger 5 of 7 criteria."""
+        p = _mixed_profile_with_minors_and_samples()
+        r = _screen_eipd(p)
+        # C1: sensitive+samples, C3: AI, C4: vulnerable+minors, C5: transfer
+        # C2: no profiling, C6: no linkage, C7: no automated decisions
+        assert r["count"] == 4
+        assert r["result"] == "EIPD OBLIGATORIA"
 
 
 # ---------------------------------------------------------------------------

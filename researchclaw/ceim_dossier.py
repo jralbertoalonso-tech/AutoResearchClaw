@@ -105,6 +105,9 @@ class StudyProfile:
     has_international_transfer: bool = False
     transfer_mechanism: str = ""  # SCC, BCR, etc.
     has_sensitive_data: bool = False
+    has_data_linkage: bool = False       # Combination of databases from different sources
+    has_systematic_profiling: bool = False  # Systematic profiling of participants
+    has_automated_decisions: bool = False   # Automated decisions with legal/significant effects (art. 22)
 
     # Optional features
     has_biological_samples: bool = False
@@ -829,35 +832,162 @@ def _generate_assent(p: StudyProfile) -> str:
     return "\n".join(lines)
 
 
+def _screen_eipd(p: StudyProfile) -> dict:
+    """Screen EIPD criteria and return structured result.
+
+    Implements all 7 AEPD criteria from the CEIm reference template,
+    plus the special rule: large-scale health data → auto-obligatory.
+
+    Returns dict with keys: criteria (list of dicts), count, result, icon,
+    large_scale_health, mitigations.
+    """
+    # Infer: biological samples with genetic data → art. 9 sensitive
+    has_art9 = p.has_sensitive_data or p.has_biological_samples
+
+    # Large-scale heuristic: health research with n≥500 is "gran escala"
+    # per AEPD guidance (WP29 guidelines on DPIA, AEPD list art. 35.4)
+    large_scale_health = has_art9 and p.estimated_sample_size >= 500
+
+    # --- 7 AEPD criteria ---
+    criteria: list[dict] = []
+
+    # C1: Sensitive data at scale (art. 9 RGPD)
+    c1 = has_art9
+    c1_detail = ""
+    if p.has_sensitive_data and p.has_biological_samples:
+        c1_detail = "datos de salud + datos genéticos/biológicos"
+    elif p.has_biological_samples:
+        c1_detail = "datos genéticos/biológicos derivados de muestras"
+    elif p.has_sensitive_data:
+        c1_detail = "datos de categorías especiales (art. 9 RGPD)"
+    criteria.append({
+        "name": "Datos sensibles (categorías art. 9 RGPD)",
+        "present": c1,
+        "detail": c1_detail,
+    })
+
+    # C2: Systematic profiling
+    c2 = p.has_systematic_profiling
+    criteria.append({
+        "name": "Perfilado sistemático de participantes",
+        "present": c2,
+        "detail": "se realiza perfilado sistemático" if c2 else "",
+    })
+
+    # C3: New technologies (AI, wearables, genomics)
+    c3 = p.has_ai_component
+    criteria.append({
+        "name": "Uso de nuevas tecnologías (IA, wearables, genómica)",
+        "present": c3,
+        "detail": _ph(p.ai_model_description) if c3 else "",
+    })
+
+    # C4: Vulnerable persons / minors
+    c4 = p.has_vulnerable or p.has_minors
+    c4_parts = []
+    if p.has_minors:
+        c4_parts.append("menores")
+    if p.has_vulnerable:
+        c4_parts.append("personas vulnerables")
+    criteria.append({
+        "name": "Datos de personas vulnerables/menores",
+        "present": c4,
+        "detail": ", ".join(c4_parts) if c4_parts else "",
+    })
+
+    # C5: International transfer
+    c5 = p.has_international_transfer
+    criteria.append({
+        "name": "Transferencia internacional de datos",
+        "present": c5,
+        "detail": f"mecanismo: {_ph(p.transfer_mechanism)}" if c5 else "",
+    })
+
+    # C6: Combination of databases from different sources
+    c6 = p.has_data_linkage
+    criteria.append({
+        "name": "Combinación de bases de datos de distintas fuentes",
+        "present": c6,
+        "detail": "linkage de bases de datos declarado" if c6 else "",
+    })
+
+    # C7: Automated decisions with legal/significant effects (art. 22)
+    # Distinct from "new technologies": art. 22 is about decisions, not tools
+    c7 = p.has_automated_decisions
+    criteria.append({
+        "name": "Decisiones automatizadas con efectos jurídicos (art. 22 RGPD)",
+        "present": c7,
+        "detail": "se garantizará el derecho a revisión humana" if c7 else "",
+    })
+
+    count = sum(1 for c in criteria if c["present"])
+
+    # AEPD special rule: large-scale health data alone → obligatory
+    if large_scale_health or count >= 3:
+        result = "EIPD OBLIGATORIA"
+        icon = "❌"
+    elif count >= 1:
+        result = "EIPD RECOMENDADA"
+        icon = "⚠️"
+    else:
+        result = "No requiere EIPD"
+        icon = "✅"
+
+    # Context-specific mitigations
+    mitigations: list[str] = []
+    if c1:
+        mitigations.append(
+            "Cifrado de datos en reposo y en tránsito (AES-256 o equivalente)."
+        )
+    if c2 or c7:
+        mitigations.append(
+            "Garantizar el derecho a revisión humana de las decisiones "
+            "automatizadas (art. 22 RGPD)."
+        )
+    if c3:
+        mitigations.append(
+            "Documentar la evaluación de sesgos del modelo y "
+            "el plan de explicabilidad (XAI)."
+        )
+    if c4:
+        mitigations.append(
+            "Aplicar salvaguardas reforzadas: consentimiento del representante "
+            "legal, lenguaje adaptado, minimización de datos."
+        )
+    if c5:
+        mitigations.append(
+            "Verificar que el mecanismo de transferencia (SCC/BCR) "
+            "esté vigente y documentado."
+        )
+    if c6:
+        mitigations.append(
+            "Documentar el proceso de linkage, garantías de calidad "
+            "del matching y re-seudonimización tras la vinculación."
+        )
+    if large_scale_health and not any(c["present"] for c in criteria[:1]):
+        # Large-scale triggered the obligation alone
+        mitigations.append(
+            "El volumen de datos de salud (n≥500) activa la obligación "
+            "de EIPD según directrices AEPD — considerar seudonimización "
+            "reforzada y auditoría de accesos."
+        )
+
+    return {
+        "criteria": criteria,
+        "count": count,
+        "result": result,
+        "icon": icon,
+        "large_scale_health": large_scale_health,
+        "mitigations": mitigations,
+    }
+
+
 def _generate_data_protection(p: StudyProfile) -> str:
     """Generate the Data Protection appendix (RGPD/LOPDGDD)."""
-    # EIPD screening
-    eipd_criteria = 0
-    eipd_details = []
-    if p.has_sensitive_data:
-        eipd_criteria += 1
-        eipd_details.append(
-            "Tratamiento de datos de categorías especiales (art. 9 RGPD)"
-        )
-    if p.has_ai_component:
-        eipd_criteria += 1
-        eipd_details.append("Uso de nuevas tecnologías (IA/ML)")
-    if p.has_vulnerable or p.has_minors:
-        eipd_criteria += 1
-        eipd_details.append("Datos de personas vulnerables/menores")
-    if p.has_international_transfer:
-        eipd_criteria += 1
-        eipd_details.append("Transferencia internacional de datos")
+    eipd = _screen_eipd(p)
 
-    if eipd_criteria >= 3:
-        eipd_result = "EIPD OBLIGATORIA"
-        eipd_icon = "❌"
-    elif eipd_criteria >= 1:
-        eipd_result = "EIPD RECOMENDADA"
-        eipd_icon = "⚠️"
-    else:
-        eipd_result = "No requiere EIPD"
-        eipd_icon = "✅"
+    # Infer art. 9 for data categories table
+    has_art9 = p.has_sensitive_data or p.has_biological_samples
 
     lines = [
         "# Apéndice de Protección de Datos",
@@ -885,12 +1015,22 @@ def _generate_data_protection(p: StudyProfile) -> str:
         "| Categoría | Descripción |",
         "|---|---|",
         "| Datos identificativos | Nombre, fecha de nacimiento, código de participante |",
-        f"| Datos de salud | {'Sí — ' + _PH if p.has_sensitive_data else 'Datos clínicos relacionados con el estudio'} |",
     ]
+
+    # Health data row — always present in research, but flag art. 9 explicitly
+    if p.has_sensitive_data:
+        lines.append(
+            f"| Datos de salud (art. 9 RGPD) | "
+            f"Datos clínicos especialmente protegidos — {_PH} |"
+        )
+    else:
+        lines.append(
+            "| Datos de salud | Datos clínicos relacionados con el estudio |"
+        )
 
     if p.has_biological_samples:
         lines.append(
-            f"| Datos genéticos/biológicos | Derivados de muestras: "
+            f"| Datos genéticos/biológicos (art. 9 RGPD) | Derivados de muestras: "
             f"{', '.join(p.sample_types) if p.sample_types else _PH} |"
         )
     if p.has_ai_component:
@@ -908,6 +1048,21 @@ def _generate_data_protection(p: StudyProfile) -> str:
         "en un sistema cifrado, accesible únicamente por el investigador "
         "principal.",
         "",
+    ]
+
+    # Enhanced security measures for art. 9 data
+    if has_art9:
+        lines += [
+            "**Medidas de seguridad adicionales** (datos art. 9 RGPD):",
+            "",
+            "- Cifrado de datos en reposo (AES-256 o equivalente)",
+            "- Control de acceso basado en roles (RBAC)",
+            "- Registro de accesos (log de auditoría)",
+            "- Copias de seguridad cifradas",
+            "",
+        ]
+
+    lines += [
         "## 5. Periodo de conservación",
         "",
         f"Los datos se conservarán durante **{p.data_retention_years} años** "
@@ -929,37 +1084,64 @@ def _generate_data_protection(p: StudyProfile) -> str:
         "",
     ]
 
+    next_section = 7
+
     if p.has_international_transfer:
         lines += [
-            "## 7. Transferencia internacional de datos",
+            f"## {next_section}. Transferencia internacional de datos",
             "",
             f"Se prevé la transferencia de datos fuera del Espacio Económico "
             f"Europeo. El mecanismo de garantía es: **{_ph(p.transfer_mechanism)}**.",
             "",
         ]
+        next_section += 1
 
+    # EIPD screening section — now fully computed
     lines += [
-        f"## {'7' if not p.has_international_transfer else '8'}. "
+        f"## {next_section}. "
         "Cribado EIPD (Evaluación de Impacto en la Protección de Datos)",
         "",
-        "| Criterio | Presente |",
-        "|---|---|",
-        f"| Datos sensibles a gran escala | {'Sí' if p.has_sensitive_data else 'No'} |",
-        f"| Nuevas tecnologías (IA) | {'Sí' if p.has_ai_component else 'No'} |",
-        f"| Personas vulnerables/menores | {'Sí' if (p.has_vulnerable or p.has_minors) else 'No'} |",
-        f"| Transferencia internacional | {'Sí' if p.has_international_transfer else 'No'} |",
-        f"| Perfilado sistemático | {_PH} |",
-        f"| Combinación de bases de datos | {_PH} |",
-        f"| Decisiones automatizadas | {'Sí — componente IA' if p.has_ai_component else 'No'} |",
+        "*Conforme al art. 35 RGPD y directrices de la AEPD.*",
         "",
-        f"**Resultado**: {eipd_icon} **{eipd_result}**",
+        "| # | Criterio AEPD | Presente | Detalle |",
+        "|---|---|---|---|",
+    ]
+
+    for i, c in enumerate(eipd["criteria"], 1):
+        present = "**Sí**" if c["present"] else "No"
+        detail = c["detail"] if c["detail"] else "—"
+        lines.append(f"| {i} | {c['name']} | {present} | {detail} |")
+    lines.append("")
+
+    # Count and result
+    lines.append(
+        f"**Criterios positivos**: {eipd['count']} de {len(eipd['criteria'])}"
+    )
+    if eipd["large_scale_health"]:
+        lines.append(
+            f"**Nota**: Tratamiento a gran escala de datos de salud "
+            f"(n={p.estimated_sample_size}) — activa EIPD obligatoria "
+            f"según directrices AEPD (art. 35.3.b RGPD)."
+        )
+    lines += [
+        "",
+        f"### Resultado: {eipd['icon']} {eipd['result']}",
         "",
     ]
-    if eipd_details:
-        lines.append("Criterios presentes:")
-        for d in eipd_details:
-            lines.append(f"- {d}")
+
+    # Mitigations
+    if eipd["mitigations"]:
+        lines.append("### Medidas de mitigación recomendadas")
         lines.append("")
+        for m in eipd["mitigations"]:
+            lines.append(f"- {m}")
+        lines.append("")
+    else:
+        lines += [
+            "No se identifican criterios de alto riesgo. Se recomienda "
+            "mantener las medidas estándar de seudonimización y seguridad.",
+            "",
+        ]
 
     lines += [
         "---",

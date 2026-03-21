@@ -9,7 +9,8 @@ Public API
 ----------
 ProtocolFamily  – coarse grouping (BIBLIOGRAPHIC | EXPERIMENTAL)
 ProtocolProfile – fine-grained sub-type within a family
-detect_protocol – single entry-point; call once per run, cache the result
+resolve_protocol – preferred entry-point; tries registry first, then keywords
+detect_protocol  – keyword-only detection (called by resolve_protocol as fallback)
 is_bibliographic – convenience predicate
 is_experimental  – convenience predicate
 PROFILE_SKIP_STAGES – maps each profile to the set of pipeline stages it skips
@@ -220,6 +221,63 @@ def _soft_keyword_to_profile(keyword: str) -> ProtocolProfile:
         return ProtocolProfile.NARRATIVE_REVIEW
     # Generic bibliographic fallback
     return ProtocolProfile.NARRATIVE_REVIEW
+
+
+# ---------------------------------------------------------------------------
+# Registry-aware resolution (preferred entry point)
+# ---------------------------------------------------------------------------
+
+# Mapping from registry pipeline_profile strings to ProtocolProfile enum.
+# Built once at import time; avoids repeated string comparisons.
+_PROFILE_BY_VALUE: dict[str, ProtocolProfile] = {p.value: p for p in ProtocolProfile}
+
+
+def resolve_protocol(
+    protocol_filename: str | None = None,
+    full_topic: str = "",
+    clean_topic: str | None = None,
+) -> ProtocolProfile:
+    """Resolve the protocol profile using the registry first, keywords second.
+
+    This is the **preferred entry point** for protocol resolution.  It
+    combines two strategies:
+
+    1. **Deterministic (registry):** If *protocol_filename* is provided and
+       exists in the protocol registry with a non-empty ``pipeline_profile``,
+       the corresponding ``ProtocolProfile`` is returned immediately — no
+       keyword scanning needed.
+
+    2. **Heuristic (keywords):** Falls back to ``detect_protocol()`` which
+       scans the topic text for bibliographic markers.
+
+    Parameters
+    ----------
+    protocol_filename:
+        The selected protocol file (e.g. ``"Revision_Sistematica_PRISMA.md"``).
+        Typically comes from the UI dropdown or a CLI flag.
+    full_topic:
+        The raw topic string (may include protocol preamble).
+    clean_topic:
+        The topic string after stripping the preamble.
+
+    Returns
+    -------
+    ProtocolProfile
+    """
+    # ── Pass 0: registry lookup (deterministic, no text scanning) ─────────
+    if protocol_filename:
+        try:
+            from researchclaw.protocol_registry import get_by_filename
+            desc = get_by_filename(protocol_filename)
+            if desc and desc.pipeline_profile:
+                profile = _PROFILE_BY_VALUE.get(desc.pipeline_profile)
+                if profile is not None:
+                    return profile
+        except ImportError:
+            pass  # registry not available — proceed to keyword detection
+
+    # ── Fallback: keyword-based detection ─────────────────────────────────
+    return detect_protocol(full_topic, clean_topic)
 
 
 # ---------------------------------------------------------------------------

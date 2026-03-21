@@ -836,6 +836,200 @@ def _build_poster(
 
 
 # ---------------------------------------------------------------------------
+# CEIm tools — review and dossier generation (LLM-free, standalone)
+# ---------------------------------------------------------------------------
+
+def _extract_text_for_review(
+    text_input: str,
+    files: list[str] | None,
+) -> str:
+    """Combine free text and uploaded file contents for CEIm review."""
+    parts: list[str] = []
+    if text_input and text_input.strip():
+        parts.append(text_input.strip())
+    if files:
+        for fpath in files:
+            src = Path(fpath)
+            suffix = src.suffix.lower()
+            if suffix == ".pdf":
+                extracted = _extract_pdf(src)
+                if extracted and not extracted.startswith("[Error"):
+                    parts.append(extracted)
+            elif suffix in (".docx", ".doc"):
+                extracted = _extract_docx(src)
+                if extracted and not extracted.startswith("[Error"):
+                    parts.append(extracted)
+            elif suffix in (".md", ".txt"):
+                try:
+                    parts.append(src.read_text(encoding="utf-8", errors="replace").strip())
+                except Exception:
+                    pass
+    return "\n\n".join(parts)
+
+
+def _run_ceim_review(
+    text_input: str,
+    files: list[str] | None,
+    study_type_choice: str,
+) -> tuple[str, dict]:
+    """Run CEIm review on provided text. Returns (markdown, file_update)."""
+    protocol_text = _extract_text_for_review(text_input, files)
+    if not protocol_text.strip():
+        return (
+            "⚠️ **No hay texto para analizar.** Pega el protocolo en el cuadro "
+            "de texto o sube un archivo PDF/DOCX/MD.",
+            gr.update(visible=False, value=None),
+        )
+
+    try:
+        from researchclaw.ceim_reviewer import (
+            StudyType,
+            generate_ceim_review,
+            render_ceim_review_md,
+        )
+    except ImportError as exc:
+        return f"❌ Error importando módulo CEIm: {exc}", gr.update(visible=False, value=None)
+
+    # Map dropdown to StudyType or None (auto-detect)
+    _type_map = {
+        "Auto-detectar": None,
+        "Observacional": StudyType.OBSERVATIONAL,
+        "Cualitativo": StudyType.QUALITATIVE,
+        "Mixto": StudyType.MIXED,
+    }
+    force_type = _type_map.get(study_type_choice)
+
+    try:
+        review = generate_ceim_review(protocol_text, force_study_type=force_type)
+        md = render_ceim_review_md(review)
+    except Exception as exc:
+        return (
+            f"❌ Error generando la review CEIm: {exc}",
+            gr.update(visible=False, value=None),
+        )
+
+    # Save to temp file for download
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False,
+            prefix="ceim_review_", encoding="utf-8",
+        )
+        tmp.write(md)
+        tmp.close()
+        return md, gr.update(visible=True, value=tmp.name)
+    except Exception:
+        return md, gr.update(visible=False, value=None)
+
+
+def _run_ceim_dossier(
+    title: str,
+    study_type_choice: str,
+    pi_name: str,
+    institution: str,
+    primary_objective: str,
+    target_population: str,
+    sample_size: int,
+    has_minors: bool,
+    has_samples: bool,
+    has_sensitive: bool,
+    has_transfer: bool,
+    has_ai: bool,
+    has_vulnerable: bool,
+    known_risks: str,
+    expected_benefits: str,
+) -> tuple[str, dict]:
+    """Generate CEIm dossier from form inputs. Returns (preview_md, file_update)."""
+    if not title.strip():
+        return (
+            "⚠️ **Introduce al menos el título del estudio.**",
+            gr.update(visible=False, value=None),
+        )
+
+    try:
+        from researchclaw.ceim_reviewer import StudyType
+        from researchclaw.ceim_dossier import (
+            StudyProfile,
+            generate_dossier,
+            write_dossier,
+        )
+    except ImportError as exc:
+        return f"❌ Error importando módulo CEIm dossier: {exc}", gr.update(visible=False, value=None)
+
+    _type_map = {
+        "Observacional": StudyType.OBSERVATIONAL,
+        "Cualitativo": StudyType.QUALITATIVE,
+        "Mixto": StudyType.MIXED,
+    }
+    stype = _type_map.get(study_type_choice, StudyType.OBSERVATIONAL)
+
+    # Parse comma-separated lists
+    risks_list = [r.strip() for r in known_risks.split(",") if r.strip()] if known_risks.strip() else []
+    benefits_list = [b.strip() for b in expected_benefits.split(",") if b.strip()] if expected_benefits.strip() else []
+
+    try:
+        profile = StudyProfile(
+            title=title.strip(),
+            study_type=stype,
+            pi_name=pi_name.strip(),
+            institution=institution.strip(),
+            primary_objective=primary_objective.strip(),
+            target_population=target_population.strip(),
+            estimated_sample_size=max(0, sample_size or 0),
+            has_minors=has_minors,
+            has_biological_samples=has_samples,
+            has_sensitive_data=has_sensitive,
+            has_international_transfer=has_transfer,
+            has_ai_component=has_ai,
+            has_vulnerable=has_vulnerable,
+            known_risks=risks_list,
+            expected_benefits=benefits_list,
+        )
+
+        dossier = generate_dossier(profile)
+    except Exception as exc:
+        return f"❌ Error generando dossier: {exc}", gr.update(visible=False, value=None)
+
+    # Build preview markdown with all documents
+    preview_parts: list[str] = []
+    doc_labels = {
+        "protocol": "📄 Protocolo",
+        "hip": "📋 Hoja de Información al Paciente",
+        "ci": "✍️ Consentimiento Informado",
+        "assent": "🧒 Asentimiento Menores",
+        "data_protection": "🔒 Protección de Datos",
+        "samples_annex": "🧪 Anexo Muestras Biológicas",
+    }
+    preview_parts.append(
+        f"## ✅ Dossier generado — {len(dossier.documents)} documento(s)\n"
+    )
+    for doc_name, content in dossier.documents.items():
+        label = doc_labels.get(doc_name, doc_name)
+        # Show first ~40 lines of each as preview
+        lines = content.split("\n")
+        preview = "\n".join(lines[:40])
+        if len(lines) > 40:
+            preview += f"\n\n*… ({len(lines) - 40} líneas más)*"
+        preview_parts.append(f"### {label}\n\n{preview}\n\n---\n")
+
+    # Write all documents to a temp dir for download as zip
+    try:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="ceim_dossier_"))
+        write_dossier(dossier, tmp_dir)
+
+        # Create zip
+        import zipfile
+        zip_path = tmp_dir.parent / f"ceim_dossier_{title[:30].replace(' ', '_')}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(tmp_dir.iterdir()):
+                if f.is_file():
+                    zf.write(f, f.name)
+
+        return "\n\n".join(preview_parts), gr.update(visible=True, value=str(zip_path))
+    except Exception as exc:
+        return "\n\n".join(preview_parts), gr.update(visible=False, value=None)
+
+
+# ---------------------------------------------------------------------------
 # Pipeline runner — genera tuplas de 8 elementos para todos los outputs
 # ---------------------------------------------------------------------------
 
@@ -1300,15 +1494,23 @@ def _ceim_banner(protocol: str | None) -> str:
     """Devuelve HTML de aviso cuando se activa el modo CEIm."""
     if protocol == _CEIM_PROTOCOL:
         return (
-            "<div style='background:#fef9c3;border-left:4px solid #ca8a04;"
-            "padding:10px 14px;border-radius:6px;margin:4px 0'>"
-            "<strong>🏛️ Modo Auditoría CEIm activo</strong> — "
-            "El sistema analizará <strong>exclusivamente</strong> los documentos que subas. "
+            "<div style='background:#92400e;color:#ffffff;"
+            "border-left:6px solid #fbbf24;"
+            "padding:14px 18px;border-radius:8px;margin:8px 0;"
+            "font-size:1em;line-height:1.6'>"
+            "<strong style='font-size:1.1em'>"
+            "🏛️ Modo Auditoría CEIm activo</strong><br>"
+            "El sistema analizará <b>exclusivamente</b> los documentos que subas. "
             "No se realizarán búsquedas externas. "
-            "<strong>🔒 Confidencialidad garantizada.</strong>"
+            "<b>🔒 Confidencialidad garantizada.</b>"
             "</div>"
         )
     return ""
+
+
+def _ceim_section_visibility(protocol: str | None):
+    """Muestra la sección CEIm cuando se activa el protocolo CEIm."""
+    return gr.update(visible=(protocol == _CEIM_PROTOCOL))
 
 
 # ---------------------------------------------------------------------------
@@ -1338,25 +1540,24 @@ footer { display: none !important; }
     padding: 12px 16px;
     margin: 6px 0;
 }
-.force-reload-btn { background: #7c3aed !important; color: white !important; }
+.ceim-tools-panel {
+    background: #fffbeb !important;
+    border: 2px solid #f59e0b !important;
+    border-radius: 10px !important;
+    padding: 14px 18px;
+    margin: 10px 0;
+    box-shadow: 0 2px 8px rgba(245, 158, 11, 0.15);
+}
 """
 
 with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
 
     # ── Cabecera ──────────────────────────────────────────────────────────
-    with gr.Row():
-        gr.Markdown(
-            "# 🔬 ResearchClaw — Laboratorio de IA Médica\n"
-            "**Fuentes:** PubMed · OpenAlex · ClinicalTrials.gov · Semantic Scholar · arXiv  "
-            "| Deduplicación automática · 11 protocolos metodológicos",
-        )
-        force_reload_btn = gr.Button(
-            "🔄 Forzar Recarga",
-            variant="secondary",
-            scale=1,
-            min_width=150,
-            elem_classes="force-reload-btn",
-        )
+    gr.Markdown(
+        "# 🔬 ResearchClaw — Laboratorio de IA Médica\n"
+        "**Fuentes:** PubMed · OpenAlex · ClinicalTrials.gov · Semantic Scholar · arXiv  "
+        "| Deduplicación automática · 11 protocolos metodológicos",
+    )
 
     # ── SECCIÓN 1: Configuración ──────────────────────────────────────────
     gr.Markdown("### ⚙️ Configuración del Laboratorio", elem_classes="section-header")
@@ -1544,6 +1745,128 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
 
     gr.Markdown("---")
 
+    # ── SECCIÓN CEIm: Herramientas de ética y dossier ──────────────────
+    with gr.Group(visible=False, elem_classes="ceim-tools-panel") as ceim_section:
+        gr.Markdown(
+            "### 🏥 Herramientas CEIm\n"
+            "<small style='color:#6b7280'>"
+            "Evaluación ética y generación de dossier CEIm. "
+            "**No requieren LLM** — funcionan directamente con tus datos.</small>"
+        )
+        with gr.Tabs():
+
+            # ── Tab 1: CEIm Review ────────────────────────────────────
+            with gr.Tab("📝 CEIm Review"):
+                gr.Markdown(
+                    "Pega el texto del protocolo o sube un PDF/DOCX. "
+                    "Se generará una evaluación estructurada con checklist "
+                    "adaptado al tipo de estudio."
+                )
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        ceim_review_text = gr.Textbox(
+                            label="Texto del protocolo / trabajo",
+                            placeholder="Pega aquí el texto completo del protocolo, HIP o artículo…",
+                            lines=10,
+                        )
+                    with gr.Column(scale=1):
+                        ceim_review_files = gr.File(
+                            label="📎 O sube PDF / DOCX / MD",
+                            file_count="multiple",
+                            file_types=[".pdf", ".docx", ".doc", ".md", ".txt"],
+                        )
+                ceim_review_type = gr.Dropdown(
+                    choices=["Auto-detectar", "Observacional", "Cualitativo", "Mixto"],
+                    value="Auto-detectar",
+                    label="Tipo de estudio",
+                    info="Deja 'Auto-detectar' para clasificación automática por keywords.",
+                )
+                ceim_review_btn = gr.Button(
+                    "🔍 Generar Review CEIm",
+                    variant="primary",
+                )
+                ceim_review_output = gr.Markdown(
+                    label="Resultado de la Review",
+                )
+                ceim_review_download = gr.File(
+                    label="⬇️ Descargar Review (.md)",
+                    visible=False,
+                )
+
+            # ── Tab 2: CEIm Dossier Generator ─────────────────────────
+            with gr.Tab("📋 Dossier Generator"):
+                gr.Markdown(
+                    "Rellena los campos del estudio y se generará un borrador "
+                    "estructurado del dossier CEIm completo (protocolo, HIP, CI, "
+                    "protección de datos y anexos aplicables)."
+                )
+                with gr.Row():
+                    with gr.Column():
+                        dossier_title = gr.Textbox(
+                            label="Título del estudio *",
+                            placeholder="Ej: Eficacia de intervención X en pacientes con HTA",
+                        )
+                        dossier_study_type = gr.Dropdown(
+                            choices=["Observacional", "Cualitativo", "Mixto"],
+                            value="Observacional",
+                            label="Tipo de estudio",
+                        )
+                        dossier_pi = gr.Textbox(
+                            label="Investigador principal",
+                            placeholder="Dra. María García",
+                        )
+                        dossier_institution = gr.Textbox(
+                            label="Centro / Institución",
+                            placeholder="Hospital Clínico Universitario",
+                        )
+                    with gr.Column():
+                        dossier_objective = gr.Textbox(
+                            label="Objetivo primario",
+                            placeholder="Evaluar la eficacia de…",
+                            lines=3,
+                        )
+                        dossier_population = gr.Textbox(
+                            label="Población diana",
+                            placeholder="Adultos con HTA grado I-II",
+                        )
+                        dossier_sample_size = gr.Number(
+                            label="Tamaño muestral estimado",
+                            value=0,
+                            precision=0,
+                        )
+                gr.Markdown("**Características del estudio:**")
+                with gr.Row():
+                    dossier_minors = gr.Checkbox(label="Menores", value=False)
+                    dossier_vulnerable = gr.Checkbox(label="Población vulnerable", value=False)
+                    dossier_samples = gr.Checkbox(label="Muestras biológicas", value=False)
+                    dossier_sensitive = gr.Checkbox(label="Datos sensibles", value=False)
+                    dossier_transfer = gr.Checkbox(label="Transferencia internacional", value=False)
+                    dossier_ai = gr.Checkbox(label="Componente IA", value=False)
+                with gr.Row():
+                    dossier_risks = gr.Textbox(
+                        label="Riesgos conocidos (separados por coma)",
+                        placeholder="Hipotensión leve, cefalea transitoria",
+                        scale=1,
+                    )
+                    dossier_benefits = gr.Textbox(
+                        label="Beneficios esperados (separados por coma)",
+                        placeholder="Reducción riesgo CV, mejora calidad de vida",
+                        scale=1,
+                    )
+                dossier_btn = gr.Button(
+                    "📋 Generar Dossier CEIm",
+                    variant="primary",
+                )
+                dossier_output = gr.Markdown(
+                    label="Vista previa del Dossier",
+                )
+                dossier_download = gr.File(
+                    label="⬇️ Descargar Dossier (.zip)",
+                    visible=False,
+                )
+
+    gr.Markdown("---")
+
     # ── SECCIÓN 2: Tarea de investigación ─────────────────────────────────
     gr.Markdown("### 📝 Tu Investigación", elem_classes="section-header")
 
@@ -1678,6 +2001,26 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
 
     open_btn.click(fn=open_results_folder, inputs=[], outputs=[])
 
+    # ── CEIm Review ────────────────────────────────────────────────────────
+    ceim_review_btn.click(
+        fn=_run_ceim_review,
+        inputs=[ceim_review_text, ceim_review_files, ceim_review_type],
+        outputs=[ceim_review_output, ceim_review_download],
+    )
+
+    # ── CEIm Dossier Generator ─────────────────────────────────────────────
+    dossier_btn.click(
+        fn=_run_ceim_dossier,
+        inputs=[
+            dossier_title, dossier_study_type, dossier_pi, dossier_institution,
+            dossier_objective, dossier_population, dossier_sample_size,
+            dossier_minors, dossier_samples, dossier_sensitive,
+            dossier_transfer, dossier_ai, dossier_vulnerable,
+            dossier_risks, dossier_benefits,
+        ],
+        outputs=[dossier_output, dossier_download],
+    )
+
     # ── Optimizador de Prompt ──────────────────────────────────────────────
     def _on_optimize(idea: str, model: str) -> dict:
         """Call _optimize_prompt and return the improved text to idea_box."""
@@ -1690,15 +2033,33 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         outputs=[idea_box],
     )
 
-    # Refresco dinámico de modelos Ollama
+    # Refresco dinámico de modelos Ollama + reset de outputs
     def _refresh_models():
         detected = _ollama_models()
-        print(f"🔄 Refresco manual — Modelos locales detectados: {detected}")
+        print(f"🔄 Refresco — Modelos detectados: {detected}")
         choices = ["(Predeterminado)"] + detected
         default = choices[1] if len(choices) > 1 else choices[0]
-        return gr.update(choices=choices, value=default)
+        return (
+            gr.update(choices=choices, value=default),  # model_dropdown
+            "",                                          # logs_box
+            "",                                          # result_md
+            gr.update(visible=False),                    # open_btn
+            gr.update(visible=False, value=None),        # pdf_download
+            gr.update(visible=False, value=None),        # docx_download
+            gr.update(visible=False, value=None),        # pptx_download
+            gr.update(visible=False, value=None),        # poster_download
+            gr.update(visible=False, value=""),          # summary_panel
+        )
 
-    refresh_models_btn.click(fn=_refresh_models, inputs=[], outputs=[model_dropdown])
+    refresh_models_btn.click(
+        fn=_refresh_models,
+        inputs=[],
+        outputs=[
+            model_dropdown, logs_box, result_md, open_btn,
+            pdf_download, docx_download, pptx_download, poster_download,
+            summary_panel,
+        ],
+    )
 
     # Actualizar estado del email cuando cambia el destinatario
     def _update_email_status(dest: str):
@@ -1761,6 +2122,12 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         inputs=[protocol_dropdown],
         outputs=[ceim_banner],
     )
+    # Mostrar/ocultar sección CEIm tools al seleccionar protocolo CEIm
+    protocol_dropdown.change(
+        fn=_ceim_section_visibility,
+        inputs=[protocol_dropdown],
+        outputs=[ceim_section],
+    )
     # Mostrar/ocultar panel de logos del póster
     protocol_dropdown.change(
         fn=_poster_panel_visibility,
@@ -1772,39 +2139,6 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         fn=_poster_format_autoselect,
         inputs=[protocol_dropdown, format_group],
         outputs=[format_group],
-    )
-
-    # ── Botón Forzar Recarga ────────────────────────────────────────────
-    def _force_reload():
-        """Refresca modelos Ollama y resetea todos los outputs de resultados."""
-        detected = _ollama_models()
-        choices  = ["(Predeterminado)"] + detected
-        default  = choices[1] if len(choices) > 1 else choices[0]
-        print(f"🔄 Forzar Recarga — Modelos detectados: {detected}")
-        return (
-            gr.update(choices=choices, value=default),  # model_dropdown
-            "",                                          # logs_box
-            "",                                          # result_md
-            gr.update(visible=False),                    # open_btn
-            gr.update(visible=False, value=None),        # pdf_download
-            gr.update(visible=False, value=None),        # docx_download
-            gr.update(visible=False, value=None),        # pptx_download
-            gr.update(visible=False, value=None),        # poster_download
-            gr.update(visible=False, value=""),          # summary_panel
-            None,                                        # logo_hospital_img
-            None,                                        # logo_university_img
-            None,                                        # logo_congress_img
-        )
-
-    force_reload_btn.click(
-        fn=_force_reload,
-        inputs=[],
-        outputs=[
-            model_dropdown, logs_box, result_md, open_btn,
-            pdf_download, docx_download, pptx_download, poster_download,
-            summary_panel,
-            logo_hospital_img, logo_university_img, logo_congress_img,
-        ],
     )
 
     # Recomendación en tiempo real

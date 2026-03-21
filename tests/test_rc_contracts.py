@@ -4,6 +4,7 @@ import pytest
 
 from researchclaw.pipeline.contracts import CONTRACTS, StageContract
 from researchclaw.pipeline.stages import GATE_STAGES, STAGE_SEQUENCE, Stage
+from researchclaw.pipeline.protocol import ProtocolFamily, StageCriticality
 
 
 def test_contracts_dict_has_exactly_23_entries():
@@ -63,8 +64,12 @@ def test_topic_init_contract_has_expected_input_output_files():
 
 def test_export_publish_contract_has_expected_outputs():
     contract = CONTRACTS[Stage.EXPORT_PUBLISH]
-
-    assert contract.output_files == ("paper_final.md", "code/")
+    # code/ is intentionally absent: it is only produced for empirical protocols.
+    # Bibliography-only runs (PRISMA, poster, etc.) produce no experiment code and
+    # must not fail at this contract check.  The executor appends "code/" to
+    # StageResult.artifacts conditionally at runtime.
+    assert "paper_final.md" in contract.output_files
+    assert "code/" not in contract.output_files
 
 
 @pytest.mark.parametrize("contract", tuple(CONTRACTS.values()))
@@ -97,3 +102,56 @@ def test_contracts_follow_stage_sequence_order():
 @pytest.mark.parametrize("stage", STAGE_SEQUENCE)
 def test_contract_stage_int_matches_stage_enum_value(stage: Stage):
     assert int(CONTRACTS[stage].stage) == int(stage)
+
+
+# ---------------------------------------------------------------------------
+# New fields: criticality + applicable_families
+# ---------------------------------------------------------------------------
+
+
+def test_quality_gate_criticality_is_soft_fail():
+    assert CONTRACTS[Stage.QUALITY_GATE].criticality == StageCriticality.SOFT_FAIL
+
+
+def test_knowledge_archive_criticality_is_advisory():
+    assert CONTRACTS[Stage.KNOWLEDGE_ARCHIVE].criticality == StageCriticality.ADVISORY
+
+
+def test_citation_verify_criticality_is_critical():
+    # Default is CRITICAL; per-profile override happens at runtime in runner.py
+    assert CONTRACTS[Stage.CITATION_VERIFY].criticality == StageCriticality.CRITICAL
+
+
+@pytest.mark.parametrize("stage", [
+    Stage.EXPERIMENT_DESIGN,
+    Stage.CODE_GENERATION,
+    Stage.RESOURCE_PLANNING,
+    Stage.EXPERIMENT_RUN,
+    Stage.ITERATIVE_REFINE,
+    Stage.RESULT_ANALYSIS,
+    Stage.RESEARCH_DECISION,
+])
+def test_experiment_stages_applicable_only_to_experimental_family(stage: Stage):
+    contract = CONTRACTS[stage]
+    assert contract.applicable_families is not None
+    assert ProtocolFamily.EXPERIMENTAL in contract.applicable_families
+    assert ProtocolFamily.BIBLIOGRAPHIC not in contract.applicable_families
+
+
+@pytest.mark.parametrize("stage", [
+    Stage.TOPIC_INIT,
+    Stage.PROBLEM_DECOMPOSE,
+    Stage.SEARCH_STRATEGY,
+    Stage.LITERATURE_COLLECT,
+    Stage.SYNTHESIS,
+    Stage.HYPOTHESIS_GEN,
+    Stage.PAPER_OUTLINE,
+    Stage.PAPER_DRAFT,
+    Stage.EXPORT_PUBLISH,
+    Stage.CITATION_VERIFY,
+])
+def test_common_stages_have_no_family_restriction(stage: Stage):
+    """Stages that apply to all protocols must have applicable_families=None."""
+    assert CONTRACTS[stage].applicable_families is None, (
+        f"{stage.name} should apply to all families (applicable_families=None)"
+    )

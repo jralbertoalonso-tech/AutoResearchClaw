@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Bootstrap environment from .env before any config YAML is read.
+# override=True so a filled .env always wins over stale empty shell exports
+# (e.g. when the shell has SCITE_API_KEY="" set explicitly).
+try:
+    from researchclaw.utils.env_bootstrap import bootstrap_env as _bootstrap_env
+    _bootstrap_env(override=True)
+except Exception:  # noqa: BLE001  # guard against circular-import during first install
+    try:
+        from dotenv import load_dotenv as _load_dotenv  # type: ignore[import]
+        _load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+    except ImportError:
+        pass
 
 CONFIG_SEARCH_ORDER: tuple[str, ...] = ("config.arc.yaml", "config.yaml")
 EXAMPLE_CONFIG = "config.researchclaw.example.yaml"
@@ -592,7 +606,11 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
         api_key=data.get("api_key", ""),
         primary_model=data.get("primary_model", ""),
         fallback_models=tuple(data.get("fallback_models") or ()),
-        s2_api_key=data.get("s2_api_key", ""),
+        s2_api_key=(
+            data.get("s2_api_key", "")
+            or os.environ.get("S2_API_KEY", "")
+            or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+        ).strip(),
         notes=data.get("notes", ""),
         acp=AcpConfig(
             agent=acp_data.get("agent", "claude"),

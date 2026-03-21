@@ -19,32 +19,57 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
+
+# Bootstrap .env so S2_API_KEY is available even in subprocess contexts.
+# override=True ensures a key in .env overrides a stale empty shell export.
+try:
+    from researchclaw.utils.env_bootstrap import bootstrap_env as _bootstrap_env
+    _bootstrap_env(override=True)
+except Exception:  # noqa: BLE001
+    try:
+        from dotenv import load_dotenv as _load_dotenv  # type: ignore[import]
+        _load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
+    except ImportError:
+        pass
 
 from researchclaw.literature.models import Author, Paper
 
 logger = logging.getLogger(__name__)
 
+# Module-level fallback key: read once at import time so every call
+# that omits api_key automatically benefits from it.
+_ENV_S2_KEY: str = (
+    os.environ.get("S2_API_KEY", "")
+    or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+).strip()
+
 _BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 _FIELDS = "paperId,title,abstract,year,venue,citationCount,authors,externalIds,url"
 _MAX_PER_REQUEST = 100
-_RATE_LIMIT_SEC = 1.5  # conservative spacing between requests
-_MAX_RETRIES = 3
-_MAX_WAIT_SEC = 60
+# Without an API key the public endpoint allows ~1 req/s bursts but is very
+# sensitive to sustained traffic.  Using a conservative 8-second floor prevents
+# the circuit breaker from tripping on the first query batch.
+# With a key (10 req/s tier) we can afford 0.3 s spacing.
+_RATE_LIMIT_SEC = 8.0   # no-key: ~7.5 req/min → well below 429 territory
+_MAX_RETRIES = 4        # one extra attempt before giving up
+_MAX_WAIT_SEC = 120     # raised ceiling for later retry slots
 _TIMEOUT_SEC = 30
 
 # ---------------------------------------------------------------------------
 # Three-state circuit breaker
 # ---------------------------------------------------------------------------
 
-_CB_THRESHOLD = 3           # consecutive 429s to trip
-_CB_INITIAL_COOLDOWN = 120  # seconds before first HALF_OPEN probe
+_CB_THRESHOLD = 5           # require 5 consecutive 429s before tripping (was 3)
+_CB_INITIAL_COOLDOWN = 180  # seconds before first HALF_OPEN probe (was 120)
 _CB_MAX_COOLDOWN = 600      # cap cooldown at 10 minutes
 
 # States
@@ -152,6 +177,9 @@ def search_semantic_scholar(
     year_min: int = 0,
     api_key: str = "",
 ) -> list[Paper]:
+    # Fall back to env key if caller didn't supply one
+    if not api_key:
+        api_key = _ENV_S2_KEY
     """Search Semantic Scholar for papers matching *query*.
 
     Parameters
@@ -236,7 +264,10 @@ def _request_with_retry(
             if exc.code == 429:
                 if _cb_on_429():
                     return None  # breaker tripped
-                delay = min(2 ** (attempt + 1), _MAX_WAIT_SEC)
+                # Base delay: 10s → 20s → 40s → 80s (capped at _MAX_WAIT_SEC).
+                # Starting at 10s avoids hammering S2 immediately after the first
+                # rate-limit response, which is what triggers the circuit breaker.
+                delay = min(10 * (2 ** attempt), _MAX_WAIT_SEC)
                 jitter = random.uniform(0, delay * 0.3)
                 wait = delay + jitter
                 logger.warning(
@@ -353,7 +384,8 @@ def _post_with_retry(
             if exc.code == 429:
                 if _cb_on_429():
                     return None
-                delay = min(2 ** (attempt + 1), _MAX_WAIT_SEC)
+                # Same 10s-floor backoff as _request_with_retry
+                delay = min(10 * (2 ** attempt), _MAX_WAIT_SEC)
                 jitter = random.uniform(0, delay * 0.3)
                 logger.warning(
                     "S2 batch rate-limited (429). Waiting %.1fs (attempt %d/%d)...",

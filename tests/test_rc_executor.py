@@ -1080,8 +1080,11 @@ def test_contracts_stage13_includes_experiment_final() -> None:
     assert "experiment_final/" in CONTRACTS[Stage.ITERATIVE_REFINE].output_files
 
 
-def test_contracts_stage22_includes_code_dir() -> None:
-    assert "code/" in CONTRACTS[Stage.EXPORT_PUBLISH].output_files
+def test_contracts_stage22_paper_final_md_is_output() -> None:
+    # code/ is intentionally absent from EXPORT_PUBLISH output_files:
+    # bibliography-only runs produce no code.  paper_final.md must be present.
+    assert "paper_final.md" in CONTRACTS[Stage.EXPORT_PUBLISH].output_files
+    assert "code/" not in CONTRACTS[Stage.EXPORT_PUBLISH].output_files
 
 
 # ── P1-1: Topic keyword extraction tests ──

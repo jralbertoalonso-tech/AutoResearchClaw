@@ -10,6 +10,14 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import cast
 
+# Bootstrap .env as early as possible so all API keys are available
+# before any library module is imported or any HTTP call is made.
+try:
+    from researchclaw.utils.env_bootstrap import bootstrap_env as _bootstrap_env
+    _bootstrap_env(override=True)
+except Exception:  # noqa: BLE001
+    pass
+
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import (
     CONFIG_SEARCH_ORDER,
@@ -42,9 +50,53 @@ def _resolve_config_or_exit(args: argparse.Namespace) -> Path | None:
 
 
 def _generate_run_id(topic: str) -> str:
+    """Generate a human-readable, semantically meaningful run folder name.
+
+    Format: rc-YYYYMMDD-HHMMSS_Kw1_Kw2_Kw3
+    The three keywords are extracted from the first meaningful words of the
+    topic string (stop-words and punctuation filtered out), making the folder
+    instantly recognisable in Finder / Explorer without opening any files.
+
+    Examples:
+      "Eficacia pembrolizumab vs quimioterapia NSCLC"
+        → rc-20260319-142031_Eficacia_pembrolizumab_NSCLC
+      "systematic review of beta-blocker efficacy in heart failure"
+        → rc-20260319-142031_systematic_beta-blocker_efficacy
+    """
+    import re as _re
+
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    topic_hash = hashlib.sha256(topic.encode()).hexdigest()[:6]
-    return f"rc-{ts}-{topic_hash}"
+
+    _STOP = frozenset({
+        "de", "del", "la", "las", "los", "el", "en", "y", "e", "o", "u",
+        "un", "una", "unos", "unas", "con", "por", "para", "sin", "sobre",
+        "entre", "a", "al", "que", "se", "es", "son", "como", "más",
+        "the", "a", "an", "of", "in", "on", "at", "to", "for", "and",
+        "or", "vs", "vs.", "with", "without", "between", "among",
+        "systematic", "review", "meta", "analysis", "study", "trial",
+    })
+
+    # Strip protocol separator blocks and markdown punctuation, then tokenise
+    clean = _re.sub(r"---.*", "", topic, flags=_re.DOTALL)
+    clean = _re.sub(r"[^\w\s\-áéíóúüñÁÉÍÓÚÜÑ]", " ", clean)
+    tokens = clean.split()
+
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        low = tok.lower().strip("-")
+        if low in _STOP or len(low) < 3:
+            continue
+        if low in seen:
+            continue
+        seen.add(low)
+        # Capitalise first letter, keep rest as-is (preserves acronyms like NSCLC)
+        keywords.append(tok.capitalize() if tok.islower() else tok)
+        if len(keywords) == 3:
+            break
+
+    suffix = "_".join(keywords) if keywords else hashlib.sha256(topic.encode()).hexdigest()[:6]
+    return f"rc-{ts}_{suffix}"
 
 
 def cmd_run(args: argparse.Namespace) -> int:

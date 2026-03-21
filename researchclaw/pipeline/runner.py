@@ -13,7 +13,20 @@ from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.evolution import EvolutionStore, extract_lessons
 from researchclaw.knowledge.base import write_stage_to_kb
-from researchclaw.pipeline.executor import StageResult, execute_stage
+from researchclaw.pipeline.executor import (
+    StageResult,
+    _clean_topic_for_search,
+    execute_stage,
+)
+from researchclaw.pipeline.protocol import (
+    ProtocolProfile,
+    StageCriticality,
+    criticality_for,
+    detect_protocol,
+    is_bibliographic,
+    is_noncritical_for,
+    skip_stages_for,
+)
 from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
     MAX_DECISION_PIVOTS,
@@ -22,6 +35,20 @@ from researchclaw.pipeline.stages import (
     Stage,
     StageStatus,
 )
+
+# ``_REVIEW_SKIP_STAGES`` and the old executor.py helpers are now replaced by
+# ``protocol.skip_stages_for(profile)`` and ``protocol.detect_protocol()``.
+# The constant below is kept only as a fallback for any code that still imports
+# it directly; prefer ``skip_stages_for(profile)`` for new code.
+_REVIEW_SKIP_STAGES: frozenset[Stage] = frozenset({
+    Stage.EXPERIMENT_DESIGN,   # 9
+    Stage.CODE_GENERATION,     # 10
+    Stage.RESOURCE_PLANNING,   # 11
+    Stage.EXPERIMENT_RUN,      # 12
+    Stage.ITERATIVE_REFINE,    # 13
+    Stage.RESULT_ANALYSIS,     # 14
+    Stage.RESEARCH_DECISION,   # 15
+})
 
 
 def _utcnow_iso() -> str:
@@ -209,10 +236,74 @@ def execute_pipeline(
     started = False
     total_stages = len(STAGE_SEQUENCE)
 
+    # ── Protocol detection ────────────────────────────────────────────────
+    #
+    # ``detect_protocol`` applies two complementary passes:
+    #
+    #  1. HARD-SKIP (deterministic): scans the FULL raw topic string including
+    #     the protocol preamble injected by web_ui.py (contains keywords like
+    #     'PRISMA', 'Póster', 'Revisión Sistemática' that are stripped by
+    #     _clean_topic_for_search and would be invisible to the soft pass).
+    #
+    #  2. SOFT-DETECT (keyword heuristic): scans the CLEAN topic as a fallback
+    #     for users who type bibliographic keywords directly (e.g.
+    #     "make a meta-analysis of ...") without a protocol file.
+    #
+    # The result is a ProtocolProfile enum value from which:
+    #   - ``skip_stages_for(profile)``  → which stages are skipped
+    #   - ``is_bibliographic(profile)`` → coarse family test
+    #   - ``is_noncritical_for(n, profile)`` → per-stage failure policy
+    _full_topic   = config.research.topic
+    _clean_topic  = _clean_topic_for_search(_full_topic)
+    _protocol     = detect_protocol(_full_topic, _clean_topic)
+    _skip_stages  = skip_stages_for(_protocol)
+    _review_mode  = is_bibliographic(_protocol)
+
+    if _review_mode:
+        logger.info(
+            "📚 Protocol detected: %s (family=BIBLIOGRAPHIC) — "
+            "stages 9–15 (experiment pipeline) will be SKIPPED. "
+            "Pipeline jumps from SYNTHESIS → PAPER_OUTLINE.",
+            _protocol.value,
+        )
+        print(
+            f"[{run_id}] Protocol: {_protocol.value} | "
+            f"Mode: BIBLIOGRAPHIC | Skipping stages: "
+            + ", ".join(str(int(s)) for s in sorted(_skip_stages))
+        )
+    else:
+        logger.info(
+            "🔬 Protocol detected: %s (family=EXPERIMENTAL) — "
+            "full 23-stage pipeline active.",
+            _protocol.value,
+        )
+        print(f"[{run_id}] Protocol: {_protocol.value} | Mode: EXPERIMENTAL | All stages active")
+
     for stage in STAGE_SEQUENCE:
         started = _should_start(stage, from_stage, started)
         if not started:
             continue
+
+        # ── Protocol-aware stage skip ─────────────────────────────────
+        if stage in _skip_stages:
+            stage_num = int(stage)
+            prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
+            print(
+                f"{prefix} {stage.name} — SKIPPED "
+                f"(protocol={_protocol.value}, family=BIBLIOGRAPHIC, "
+                f"no experiments needed)"
+            )
+            skip_result = StageResult(
+                stage=stage,
+                status=StageStatus.DONE,
+                artifacts=(),
+                decision=f"skipped:protocol={_protocol.value}",
+            )
+            results.append(skip_result)
+            _write_checkpoint(run_dir, stage, run_id)
+            _write_heartbeat(run_dir, stage, run_id)
+            continue
+        # ──────────────────────────────────────────────────────────────
 
         stage_num = int(stage)
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
@@ -349,8 +440,36 @@ def execute_pipeline(
                 )
 
         if result.status == StageStatus.FAILED:
-            if skip_noncritical and stage in NONCRITICAL_STAGES:
-                logger.warning("Noncritical stage %s failed - skipping", stage.name)
+            # Protocol-aware noncritical check with two tiers:
+            #
+            # TIER 1 — SOFT_FAIL: ALWAYS continue regardless of skip_noncritical.
+            #   These stages have fallback logic that produces usable output even
+            #   on failure (e.g. CITATION_VERIFY in bibliographic mode writes the
+            #   original bib as fallback).  Stopping the pipeline here would
+            #   discard valid deliverables.
+            #
+            # TIER 2 — ADVISORY / NONCRITICAL_STAGES: continue only when
+            #   skip_noncritical=True (user-controlled).
+            #
+            _crit = criticality_for(int(stage), _protocol)
+            _is_soft_fail = (_crit == StageCriticality.SOFT_FAIL)
+            _is_advisory  = (
+                _crit == StageCriticality.ADVISORY
+                or stage in NONCRITICAL_STAGES
+            )
+
+            if _is_soft_fail:
+                logger.warning(
+                    "SOFT_FAIL stage %s failed (protocol=%s) — continuing "
+                    "(stage has fallback output)",
+                    stage.name, _protocol.value,
+                )
+            elif skip_noncritical and _is_advisory:
+                logger.warning(
+                    "Advisory stage %s failed (protocol=%s) — skipping "
+                    "(skip_noncritical=True)",
+                    stage.name, _protocol.value,
+                )
             else:
                 break
         if result.status == StageStatus.BLOCKED_APPROVAL and stop_on_gate:
@@ -411,6 +530,11 @@ def _package_deliverables(
     dest = run_dir / "deliverables"
     dest.mkdir(parents=True, exist_ok=True)
 
+    # Detect protocol so we can pass bibliographic_mode to the LaTeX converter
+    _full_topic   = config.research.topic
+    _clean_topic  = _clean_topic_for_search(_full_topic)
+    _bib_mode     = is_bibliographic(detect_protocol(_full_topic, _clean_topic))
+
     packaged: list[str] = []
 
     # --- 1. Final paper (Markdown) ---
@@ -451,6 +575,7 @@ def _package_deliverables(
                 title=_extract_paper_title(v_text),
                 authors=config.export.authors,
                 bib_file=config.export.bib_file,
+                bibliographic_mode=_bib_mode,
             )
             # IMP-17: Quality check — ensure regenerated LaTeX has
             # proper structure (abstract, multiple sections)

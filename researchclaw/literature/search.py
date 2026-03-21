@@ -25,15 +25,18 @@ import urllib.error
 from typing import cast
 
 from researchclaw.literature.arxiv_client import search_arxiv
+from researchclaw.literature.clinicaltrials_client import search_clinicaltrials
 from researchclaw.literature.models import Author, Paper
 from researchclaw.literature.openalex_client import search_openalex
+from researchclaw.literature.pubmed_client import search_pubmed
+from researchclaw.literature.scite_client import scite_results_to_papers, search_scite
 from researchclaw.literature.semantic_scholar import search_semantic_scholar
 
 logger = logging.getLogger(__name__)
 
 # OpenAlex first (10K/day), then S2 (1K/5min), then arXiv (1/3s) — least
-# pressure on the most restrictive API.
-_DEFAULT_SOURCES = ("openalex", "semantic_scholar", "arxiv")
+# pressure on the most restrictive API.  scite added last (key required).
+_DEFAULT_SOURCES = ("pubmed", "clinicaltrials", "openalex", "semantic_scholar", "arxiv", "scite")
 
 
 CacheGet = Callable[[str, str, int], list[dict[str, object]] | None]
@@ -109,6 +112,7 @@ def search_papers(
     year_min: int = 0,
     deduplicate: bool = True,
     s2_api_key: str = "",
+    scite_api_key: str = "",
 ) -> list[Paper]:
     """Search multiple academic sources and return deduplicated results.
 
@@ -126,6 +130,8 @@ def search_papers(
         Whether to remove duplicates across sources.
     s2_api_key:
         Optional Semantic Scholar API key.
+    scite_api_key:
+        Optional scite.ai API key (falls back to SCITE_API_KEY env var).
 
     Returns
     -------
@@ -146,7 +152,35 @@ def search_papers(
             "semantic_scholar" if src_lower in ("semantic_scholar", "s2") else src_lower
         )
         try:
-            if src_lower == "openalex":
+            if src_lower == "pubmed":
+                papers = search_pubmed(
+                    query,
+                    limit=limit,
+                    year_min=year_min,
+                )
+                all_papers.extend(papers)
+                cache_put(query, "pubmed", limit, _papers_to_dicts(papers))
+                source_stats["pubmed"] = len(papers)
+                logger.info(
+                    "PubMed returned %d papers for %r", len(papers), query
+                )
+                time.sleep(0.5)
+
+            elif src_lower in ("clinicaltrials", "clinical_trials"):
+                papers = search_clinicaltrials(
+                    query,
+                    limit=limit,
+                    year_min=year_min,
+                )
+                all_papers.extend(papers)
+                cache_put(query, "clinicaltrials", limit, _papers_to_dicts(papers))
+                source_stats["clinicaltrials"] = len(papers)
+                logger.info(
+                    "ClinicalTrials.gov returned %d studies for %r", len(papers), query
+                )
+                time.sleep(0.5)
+
+            elif src_lower == "openalex":
                 papers = search_openalex(
                     query,
                     limit=limit,
@@ -182,6 +216,20 @@ def search_papers(
                 cache_put(query, "arxiv", limit, _papers_to_dicts(papers))
                 source_stats["arxiv"] = len(papers)
                 logger.info("arXiv returned %d papers for %r", len(papers), query)
+
+            elif src_lower == "scite":
+                scite_results = search_scite(
+                    query,
+                    limit=limit,
+                    year_min=year_min,
+                    api_key=scite_api_key,
+                )
+                papers = scite_results_to_papers(scite_results)
+                all_papers.extend(papers)
+                cache_put(query, "scite", limit, _papers_to_dicts(papers))
+                source_stats["scite"] = len(papers)
+                logger.info("scite returned %d papers for %r", len(papers), query)
+                time.sleep(0.5)
 
             else:
                 logger.warning("Unknown literature source: %s (skipped)", src)
@@ -237,6 +285,7 @@ def search_papers_multi_query(
     sources: Sequence[str] = _DEFAULT_SOURCES,
     year_min: int = 0,
     s2_api_key: str = "",
+    scite_api_key: str = "",
     inter_query_delay: float = 1.5,
 ) -> list[Paper]:
     """Run multiple queries and return deduplicated union.
@@ -254,6 +303,7 @@ def search_papers_multi_query(
             sources=sources,
             year_min=year_min,
             s2_api_key=s2_api_key,
+            scite_api_key=scite_api_key,
             deduplicate=False,  # we dedup globally below
         )
         all_papers.extend(results)

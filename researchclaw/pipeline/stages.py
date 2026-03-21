@@ -140,7 +140,13 @@ NONCRITICAL_STAGES: frozenset[Stage] = frozenset(
     {
         Stage.QUALITY_GATE,       # 20: low quality should warn, not block deliverables
         Stage.KNOWLEDGE_ARCHIVE,  # 21: archival doesn't affect paper output
-        # T3.4: CITATION_VERIFY removed — hallucinated citations MUST block export
+        # CITATION_VERIFY (23) is intentionally absent from this static set:
+        # • In EXPERIMENTAL mode it remains CRITICAL (hallucinated citations block export).
+        # • In BIBLIOGRAPHIC mode runner.py calls
+        #   ``protocol.is_noncritical_for(23, profile)`` which downgrades it to
+        #   SOFT_FAIL — a partial citation check must not kill the paper output when
+        #   there are no LLM-generated experiment claims to verify.
+        # See researchclaw/pipeline/protocol.py::_PROFILE_CRITICALITY_OVERRIDES.
     }
 )
 

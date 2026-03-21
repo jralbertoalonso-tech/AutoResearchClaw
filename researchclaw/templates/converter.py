@@ -56,6 +56,7 @@ def markdown_to_latex(
     title: str = "",
     authors: str = "Anonymous",
     bib_file: str = "references",
+    bibliographic_mode: bool = False,
 ) -> str:
     """Convert a Markdown paper to a complete LaTeX document.
 
@@ -72,6 +73,13 @@ def markdown_to_latex(
         Author string inserted into the template author block.
     bib_file:
         Bibliography filename (without ``.bib`` extension).
+    bibliographic_mode:
+        When True the converter is operating on a BIBLIOGRAPHIC protocol
+        (systematic review, meta-analysis, PRISMA, poster, etc.).  This
+        suppresses completeness warnings about missing "experiment" /
+        "result" sections (which are irrelevant for reviews) and adjusts
+        fallback caption text to say "collected studies" instead of
+        "experimental results".  Default: False.
 
     Returns
     -------
@@ -98,7 +106,12 @@ def markdown_to_latex(
     body = _deduplicate_tables(body)
 
     # R10-Fix5: Completeness check
-    completeness_warnings = check_paper_completeness(sections)
+    # In bibliographic mode the pipeline skips stages 9-15 (experiment phases),
+    # so "experiment" and "result" sections are expected to be absent.
+    # Suppress those specific warnings to avoid false-positive noise.
+    completeness_warnings = check_paper_completeness(
+        sections, bibliographic_mode=bibliographic_mode
+    )
     if completeness_warnings:
         import logging
 
@@ -117,7 +130,7 @@ def markdown_to_latex(
     tex = preamble + "\n" + body + footer
 
     # Final sanitization pass on the complete LaTeX output
-    tex = _sanitize_latex_output(tex)
+    tex = _sanitize_latex_output(tex, bibliographic_mode=bibliographic_mode)
 
     return tex
 
@@ -127,7 +140,7 @@ def markdown_to_latex(
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_latex_output(tex: str) -> str:
+def _sanitize_latex_output(tex: str, *, bibliographic_mode: bool = False) -> str:
     """Remove artifacts that slip through pre-processing into the final .tex."""
     # 1. Remove broken citation markers: \cite{?key:NOT_IN_BIB} or literal [?key:NOT_IN_BIB]
     tex = re.sub(r"\\cite\{\?[^}]*:NOT_IN_BIB\}", "", tex)
@@ -151,11 +164,17 @@ def _sanitize_latex_output(tex: str) -> str:
     tex = re.sub(r"^(\s*```[a-z]*\s*)$", r"% removed stray fence: \1", tex, flags=re.MULTILINE)
 
     # 4. Fix placeholder table captions: \caption{Table N} → descriptive
-    #    Can't auto-generate content, but at least don't leave "Table 1" as
-    #    the only caption text — append " -- See text for details."
+    #    Caption suffix depends on protocol:
+    #      - bibliographic mode: "Summary of collected studies"
+    #      - experimental mode:  "Summary of experimental results"
+    _caption_suffix = (
+        "Summary of collected studies."
+        if bibliographic_mode
+        else "Summary of experimental results."
+    )
     tex = re.sub(
         r"\\caption\{(Table\s+\d+)\}",
-        r"\\caption{\1 -- Summary of experimental results.}",
+        rf"\\caption{{\1 -- {_caption_suffix}}}",
         tex,
     )
 
@@ -1354,13 +1373,30 @@ _SECTION_ALIASES: dict[str, str] = {
 }
 
 
-def check_paper_completeness(sections: list[_Section]) -> list[str]:
+def check_paper_completeness(
+    sections: list[_Section],
+    *,
+    bibliographic_mode: bool = False,
+) -> list[str]:
     """Check whether a paper contains all expected sections.
+
+    Parameters
+    ----------
+    sections:
+        Parsed sections from ``_parse_sections()``.
+    bibliographic_mode:
+        When True, sections that only apply to empirical/experimental papers
+        (``experiment``, ``result``) are not required — a systematic review
+        is not expected to have an "Experiments" section.
 
     Returns a list of warning strings.  Empty list means the paper
     structure looks complete.
     """
     warnings: list[str] = []
+
+    # Sections that are ONLY expected in experimental (non-bibliographic) papers.
+    # In bibliographic mode these are allowed to be absent without a warning.
+    _EXPERIMENTAL_ONLY_SECTIONS: frozenset[str] = frozenset({"experiment", "result"})
 
     # Check for valid title — look for any H1/H2 heading that could be a title
     _has_title = any(
@@ -1390,7 +1426,13 @@ def check_paper_completeness(sections: list[_Section]) -> list[str]:
                         found_sections.add(expected)
                         break
 
-    missing = _EXPECTED_SECTIONS - found_sections
+    # In bibliographic mode do NOT require experiment/result sections
+    effective_expected = (
+        _EXPECTED_SECTIONS - _EXPERIMENTAL_ONLY_SECTIONS
+        if bibliographic_mode
+        else _EXPECTED_SECTIONS
+    )
+    missing = effective_expected - found_sections
     if missing:
         warnings.append(
             f"Missing sections: {', '.join(sorted(missing))}. "

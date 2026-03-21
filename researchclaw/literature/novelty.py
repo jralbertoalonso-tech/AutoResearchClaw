@@ -337,7 +337,13 @@ def check_novelty(
 
 def _build_novelty_queries(topic: str, hypotheses_text: str) -> list[str]:
     """Build targeted search queries from topic and hypotheses."""
-    queries = [topic]
+    # Clean system-instruction blocks that web_ui.py prepends to the topic.
+    # Without this, the full guardrails preamble gets sent to search APIs,
+    # causing HTTP 400/414 errors on PubMed, ClinicalTrials, OpenAlex, etc.
+    from researchclaw.pipeline.executor import _clean_topic_for_search  # noqa: PLC0415
+
+    cleaned = _clean_topic_for_search(topic)
+    queries = [cleaned]
 
     # Extract hypothesis titles (## H1, ## H2, etc.)
     for match in re.finditer(r"^##\s+H\d+[:\s]*(.+)", hypotheses_text, re.MULTILINE):

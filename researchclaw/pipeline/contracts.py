@@ -6,23 +6,36 @@ Each StageContract declares:
   - dod: Definition of Done — human-readable acceptance criterion
   - error_code: unique error identifier for diagnostics
   - max_retries: how many times the stage may be retried on failure
+  - criticality: default failure policy (overridden per-profile at runtime)
+  - applicable_families: which ProtocolFamily values activate this stage
+                         (None = applies to all families)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from researchclaw.pipeline.stages import Stage
+from researchclaw.pipeline.protocol import (
+    ProtocolFamily,
+    StageCriticality,
+)
+
+_ALL_FAMILIES: tuple[ProtocolFamily, ...] = tuple(ProtocolFamily)
 
 
 @dataclass(frozen=True)
 class StageContract:
     stage: Stage
-    input_files: tuple[str, ...]
+    input_files: tuple[str, ...]      # Required inputs — missing → FAILED immediately
     output_files: tuple[str, ...]
     dod: str
     error_code: str
     max_retries: int = 1
+    optional_input_files: tuple[str, ...] = ()  # Informational only; not validated
+    criticality: StageCriticality = StageCriticality.CRITICAL
+    # None means "all families".  Restrict to control which modes execute a stage.
+    applicable_families: tuple[ProtocolFamily, ...] | None = None
 
 
 CONTRACTS: dict[Stage, StageContract] = {
@@ -88,7 +101,7 @@ CONTRACTS: dict[Stage, StageContract] = {
         dod=">=2 falsifiable research hypotheses",
         error_code="E08_HYP_INVALID",
     ),
-    # Phase D: Experiment Design
+    # Phase D: Experiment Design  (EXPERIMENTAL family only)
     Stage.EXPERIMENT_DESIGN: StageContract(
         stage=Stage.EXPERIMENT_DESIGN,
         input_files=("hypotheses.md",),
@@ -96,6 +109,7 @@ CONTRACTS: dict[Stage, StageContract] = {
         dod="Experiment plan with baselines, ablations, metrics approved",
         error_code="E09_GATE_REJECT",
         max_retries=0,
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
     Stage.CODE_GENERATION: StageContract(
         stage=Stage.CODE_GENERATION,
@@ -104,6 +118,7 @@ CONTRACTS: dict[Stage, StageContract] = {
         dod="Multi-file experiment project + spec document",
         error_code="E10_CODEGEN_FAIL",
         max_retries=2,
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
     Stage.RESOURCE_PLANNING: StageContract(
         stage=Stage.RESOURCE_PLANNING,
@@ -111,8 +126,9 @@ CONTRACTS: dict[Stage, StageContract] = {
         output_files=("schedule.json",),
         dod="Resource schedule with GPU/time estimates",
         error_code="E11_SCHED_CONFLICT",
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
-    # Phase E: Experiment Execution
+    # Phase E: Experiment Execution  (EXPERIMENTAL family only)
     Stage.EXPERIMENT_RUN: StageContract(
         stage=Stage.EXPERIMENT_RUN,
         input_files=("schedule.json", "experiment/"),
@@ -120,6 +136,7 @@ CONTRACTS: dict[Stage, StageContract] = {
         dod="All scheduled experiment runs completed with artifacts",
         error_code="E12_RUN_FAIL",
         max_retries=2,
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
     Stage.ITERATIVE_REFINE: StageContract(
         stage=Stage.ITERATIVE_REFINE,
@@ -128,14 +145,16 @@ CONTRACTS: dict[Stage, StageContract] = {
         dod="Edit-run-eval loop converged or max iterations reached",
         error_code="E13_REFINE_FAIL",
         max_retries=2,
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
-    # Phase F: Analysis & Decision
+    # Phase F: Analysis & Decision  (EXPERIMENTAL family only)
     Stage.RESULT_ANALYSIS: StageContract(
         stage=Stage.RESULT_ANALYSIS,
         input_files=("runs/",),
         output_files=("analysis.md",),
         dod="Metrics analyzed with statistical tests and conclusions",
         error_code="E14_ANALYSIS_ERR",
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
     Stage.RESEARCH_DECISION: StageContract(
         stage=Stage.RESEARCH_DECISION,
@@ -143,11 +162,18 @@ CONTRACTS: dict[Stage, StageContract] = {
         output_files=("decision.md",),
         dod="PROCEED/PIVOT decision with evidence-based justification",
         error_code="E15_DECISION_FAIL",
+        applicable_families=(ProtocolFamily.EXPERIMENTAL,),
     ),
     # Phase G: Paper Writing
     Stage.PAPER_OUTLINE: StageContract(
         stage=Stage.PAPER_OUTLINE,
-        input_files=("analysis.md", "decision.md"),
+        # analysis.md + decision.md are produced by Stages 14-15 (experiment path).
+        # In Systematic Review / Bibliography mode those stages are skipped, so
+        # these inputs may be absent.  _execute_paper_outline falls back to
+        # synthesis.md (Stage 07) when analysis.md is not found.
+        # They are therefore declared as optional_input_files (not validated).
+        input_files=(),
+        optional_input_files=("analysis.md", "decision.md"),
         output_files=("outline.md",),
         dod="Complete paper outline with section-level detail",
         error_code="E16_OUTLINE_FAIL",
@@ -181,6 +207,7 @@ CONTRACTS: dict[Stage, StageContract] = {
         dod="Quality score meets threshold and approved",
         error_code="E20_GATE_REJECT",
         max_retries=0,
+        criticality=StageCriticality.SOFT_FAIL,   # warn, never block deliverables
     ),
     Stage.KNOWLEDGE_ARCHIVE: StageContract(
         stage=Stage.KNOWLEDGE_ARCHIVE,
@@ -188,11 +215,16 @@ CONTRACTS: dict[Stage, StageContract] = {
         output_files=("archive.md", "bundle_index.json"),
         dod="Retrospective + reproducibility bundle archived",
         error_code="E21_ARCHIVE_FAIL",
+        criticality=StageCriticality.ADVISORY,    # archival; fully non-blocking
     ),
     Stage.EXPORT_PUBLISH: StageContract(
         stage=Stage.EXPORT_PUBLISH,
         input_files=("paper_revised.md",),
-        output_files=("paper_final.md", "code/"),
+        # code/ is intentionally absent: it is generated only when experiment
+        # code exists (empirical protocols).  Bibliography-only runs (Revisión
+        # Sistemática, Póster, etc.) produce no code and must not fail here.
+        # The executor appends "code/" to StageResult.artifacts conditionally.
+        output_files=("paper_final.md",),
         dod="Final paper exported in target format",
         error_code="E22_EXPORT_FAIL",
     ),
@@ -202,5 +234,9 @@ CONTRACTS: dict[Stage, StageContract] = {
         output_files=("verification_report.json", "references_verified.bib"),
         dod="All citations verified against real APIs; hallucinated refs flagged",
         error_code="E23_VERIFY_FAIL",
+        # Default: CRITICAL (hallucinated citations must block in experimental mode).
+        # The runner overrides this to SOFT_FAIL for bibliographic profiles via
+        # protocol.criticality_for(23, profile).
+        criticality=StageCriticality.CRITICAL,
     ),
 }

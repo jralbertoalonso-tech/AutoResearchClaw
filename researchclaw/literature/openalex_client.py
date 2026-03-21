@@ -88,17 +88,21 @@ def search_openalex(
     if year_min > 0:
         filters.append(f"from_publication_date:{year_min}-01-01")
 
+    # title_and_abstract.search targets only title+abstract fields,
+    # which is more precise for medical queries than global search.
+    # Do NOT pre-quote the query: urlencode handles the full encoding
+    # in one pass; pre-quoting would cause double-encoding (%20 → %2520).
+    filters.append(f"title_and_abstract.search:{query}")
+
     params: dict[str, str] = {
-        "search": query,
+        "filter": ",".join(filters),
         "per_page": str(limit),
         "mailto": email,
         "select": (
             "id,title,authorships,publication_year,primary_location,"
-            "cited_by_count,doi,ids,abstract_inverted_index,type"
+            "cited_by_count,doi,ids,abstract_inverted_index,type,open_access"
         ),
     }
-    if filters:
-        params["filter"] = ",".join(filters)
 
     url = f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
     data = _request_with_retry(url, email)
@@ -271,9 +275,15 @@ def _parse_openalex_work(item: dict[str, Any]) -> Paper:
         if m:
             arxiv_id = m.group(1)
 
-    # URL
+    # Open Access URL — direct link to full text (PDF or HTML)
+    oa_info = item.get("open_access") or {}
+    oa_url = str(oa_info.get("oa_url") or "").strip()
+
+    # URL priority: OA full-text > arXiv > DOI > OpenAlex page
     url = ""
-    if arxiv_id:
+    if oa_url:
+        url = oa_url
+    elif arxiv_id:
         url = f"https://arxiv.org/abs/{arxiv_id}"
     elif doi:
         url = f"https://doi.org/{doi}"

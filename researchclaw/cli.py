@@ -105,6 +105,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     config_path = resolved
     topic = cast(str | None, args.topic)
+    protocol_file = cast(str | None, getattr(args, "protocol_file", None))
     output = cast(str | None, args.output)
     from_stage_name = cast(str | None, args.from_stage)
     auto_approve = cast(bool, args.auto_approve)
@@ -205,6 +206,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         stop_on_gate=stop_on_gate,
         skip_noncritical=skip_noncritical,
         kb_root=kb_root_path,
+        protocol_filename=protocol_file,
     )
 
     done = sum(1 for r in results if r.status.value == "done")
@@ -404,6 +406,16 @@ def main(argv: list[str] | None = None) -> int:
 
     run_p = sub.add_parser("run", help="Run the 23-stage research pipeline")
     _ = run_p.add_argument("--topic", "-t", help="Override research topic")
+    _ = run_p.add_argument(
+        "--protocol-file",
+        default=None,
+        metavar="FILENAME",
+        help=(
+            "Filename of the selected protocol (e.g. Revision_Sistematica_PRISMA.md). "
+            "Used for deterministic protocol resolution via the registry; "
+            "falls back to keyword detection when omitted."
+        ),
+    )
     _ = run_p.add_argument(
         "--config", "-c", default=None,
         help="Config file (default: auto-detect config.arc.yaml or config.yaml)",

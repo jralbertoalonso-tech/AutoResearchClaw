@@ -23,6 +23,7 @@ from researchclaw.pipeline.protocol import (
     is_bibliographic,
     is_experimental,
     is_noncritical_for,
+    resolve_protocol,
     skip_stages_for,
 )
 from researchclaw.pipeline.stages import Stage
@@ -310,3 +311,122 @@ class TestDetectAndSkipIntegration:
     def test_citation_verify_noncritical_after_prisma_detection(self) -> None:
         profile = detect_protocol("PRISMA meta-analysis of antidepressants", None)
         assert is_noncritical_for(23, profile) is True
+
+
+# ---------------------------------------------------------------------------
+# resolve_protocol — registry-aware resolution
+# ---------------------------------------------------------------------------
+
+
+class TestResolveProtocol:
+    """Tests for resolve_protocol() which tries registry first, keywords second."""
+
+    # ── Registry path (deterministic) ──────────────────────────────────────
+
+    def test_prisma_by_filename(self) -> None:
+        """Known filename with pipeline_profile → direct resolution."""
+        profile = resolve_protocol(protocol_filename="Revision_Sistematica_PRISMA.md")
+        assert profile == ProtocolProfile.SYSTEMATIC_REVIEW_PRISMA
+
+    def test_poster_by_filename(self) -> None:
+        profile = resolve_protocol(protocol_filename="Poster_Congreso.md")
+        assert profile == ProtocolProfile.POSTER_ONLY
+
+    def test_analisis_rapido_by_filename(self) -> None:
+        profile = resolve_protocol(protocol_filename="Analisis_Rapido.md")
+        assert profile == ProtocolProfile.NARRATIVE_REVIEW
+
+    def test_registry_match_ignores_topic_text(self) -> None:
+        """When registry resolves, topic text is not scanned."""
+        profile = resolve_protocol(
+            protocol_filename="Revision_Sistematica_PRISMA.md",
+            full_topic="Some random ML experiment with no keywords",
+        )
+        assert profile == ProtocolProfile.SYSTEMATIC_REVIEW_PRISMA
+
+    # ── Fallback to keywords ───────────────────────────────────────────────
+
+    def test_unknown_filename_falls_back_to_keywords(self) -> None:
+        """File not in registry → falls back to detect_protocol()."""
+        profile = resolve_protocol(
+            protocol_filename="Unknown_Protocol.md",
+            full_topic="Systematic review of PRISMA guidelines",
+        )
+        assert profile == ProtocolProfile.SYSTEMATIC_REVIEW_PRISMA
+
+    def test_no_filename_falls_back_to_keywords(self) -> None:
+        """No filename → pure keyword detection."""
+        profile = resolve_protocol(
+            full_topic="meta-analysis of randomized trials",
+        )
+        assert profile == ProtocolProfile.META_ANALYSIS
+
+    def test_none_filename_falls_back_to_keywords(self) -> None:
+        profile = resolve_protocol(
+            protocol_filename=None,
+            full_topic="Scoping review of AI in healthcare",
+        )
+        assert profile == ProtocolProfile.SCOPING_REVIEW
+
+    def test_no_filename_no_keywords_returns_generic(self) -> None:
+        profile = resolve_protocol(
+            full_topic="Investigating new cancer biomarkers",
+        )
+        assert profile == ProtocolProfile.GENERIC
+
+    # ── Protocols without pipeline_profile → fallback ──────────────────────
+
+    def test_ceim_filename_no_pipeline_profile(self) -> None:
+        """CEIm has no pipeline_profile → falls back to keywords in topic."""
+        profile = resolve_protocol(
+            protocol_filename="Auditoria_Protocolo_CEIm.md",
+            full_topic="Audit CEIm research protocol",
+        )
+        # CEIm .md doesn't contain bibliographic keywords → GENERIC
+        assert profile == ProtocolProfile.GENERIC
+
+    def test_pptx_filename_no_pipeline_profile(self) -> None:
+        """PowerPoint has no pipeline_profile → falls back."""
+        profile = resolve_protocol(
+            protocol_filename="Presentacion_PowerPoint.md",
+            full_topic="Create a presentation about diabetes management",
+        )
+        assert profile == ProtocolProfile.GENERIC
+
+    # ── Consistency: registry and keywords agree ───────────────────────────
+
+    def test_prisma_registry_matches_keyword_detection(self) -> None:
+        """For PRISMA, both paths should agree."""
+        by_registry = resolve_protocol(
+            protocol_filename="Revision_Sistematica_PRISMA.md",
+        )
+        by_keywords = detect_protocol(
+            "Revisión Sistemática PRISMA 2020 sobre...",
+        )
+        assert by_registry == by_keywords
+
+    def test_poster_registry_matches_keyword_detection(self) -> None:
+        by_registry = resolve_protocol(
+            protocol_filename="Poster_Congreso.md",
+        )
+        by_keywords = detect_protocol("Póster de congreso sobre...")
+        assert by_registry == by_keywords
+
+    # ── Behavioral properties ──────────────────────────────────────────────
+
+    def test_empty_call_returns_generic(self) -> None:
+        """No filename, no topic → GENERIC."""
+        profile = resolve_protocol()
+        assert profile == ProtocolProfile.GENERIC
+
+    def test_resolve_result_compatible_with_skip_stages(self) -> None:
+        """Result of resolve_protocol works with skip_stages_for."""
+        profile = resolve_protocol(protocol_filename="Revision_Sistematica_PRISMA.md")
+        skipped = skip_stages_for(profile)
+        assert len(skipped) > 0  # bibliographic → skips experiment stages
+
+    def test_resolve_result_compatible_with_criticality(self) -> None:
+        """Result of resolve_protocol works with criticality_for."""
+        profile = resolve_protocol(protocol_filename="Revision_Sistematica_PRISMA.md")
+        crit = criticality_for(23, profile)
+        assert crit == StageCriticality.SOFT_FAIL

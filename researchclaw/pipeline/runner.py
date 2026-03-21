@@ -25,6 +25,7 @@ from researchclaw.pipeline.protocol import (
     detect_protocol,
     is_bibliographic,
     is_noncritical_for,
+    resolve_protocol,
     skip_stages_for,
 )
 from researchclaw.pipeline.stages import (
@@ -229,6 +230,7 @@ def execute_pipeline(
     stop_on_gate: bool = False,
     skip_noncritical: bool = False,
     kb_root: Path | None = None,
+    protocol_filename: str | None = None,
 ) -> list[StageResult]:
     """Execute pipeline stages sequentially from `from_stage` and write summary."""
 
@@ -236,9 +238,14 @@ def execute_pipeline(
     started = False
     total_stages = len(STAGE_SEQUENCE)
 
-    # ── Protocol detection ────────────────────────────────────────────────
+    # ── Protocol resolution ───────────────────────────────────────────────
     #
-    # ``detect_protocol`` applies two complementary passes:
+    # ``resolve_protocol`` applies three passes in priority order:
+    #
+    #  0. REGISTRY (deterministic): if ``protocol_filename`` is provided and
+    #     the filename is found in the protocol registry with a known
+    #     ``pipeline_profile``, the corresponding ProtocolProfile is returned
+    #     immediately — no text scanning needed.
     #
     #  1. HARD-SKIP (deterministic): scans the FULL raw topic string including
     #     the protocol preamble injected by web_ui.py (contains keywords like
@@ -255,7 +262,7 @@ def execute_pipeline(
     #   - ``is_noncritical_for(n, profile)`` → per-stage failure policy
     _full_topic   = config.research.topic
     _clean_topic  = _clean_topic_for_search(_full_topic)
-    _protocol     = detect_protocol(_full_topic, _clean_topic)
+    _protocol     = resolve_protocol(protocol_filename, _full_topic, _clean_topic)
     _skip_stages  = skip_stages_for(_protocol)
     _review_mode  = is_bibliographic(_protocol)
 
@@ -404,6 +411,7 @@ def execute_pipeline(
                     stop_on_gate=stop_on_gate,
                     skip_noncritical=skip_noncritical,
                     kb_root=kb_root,
+                    protocol_filename=protocol_filename,
                 )
                 results.extend(pivot_results)
                 break  # Exit current loop; recursive call handles the rest

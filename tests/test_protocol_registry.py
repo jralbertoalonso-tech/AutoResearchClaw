@@ -327,6 +327,22 @@ class TestSpecificProtocols:
         assert p.maturity == Maturity.MVP
         assert p.requires_llm is False
 
+    def test_consulta_clinica_pico_is_mvp(self):
+        """Consulta Clínica PICO promoted from SPEC to MVP.
+
+        Uses narrative_review pipeline profile — bibliographic search
+        without experiment stages (9-15). Routing verified by
+        test_rc_protocol.py::TestResolveProtocol::test_consulta_clinica_pico_by_filename.
+        """
+        p = get_protocol("consulta_clinica_pico")
+        assert p is not None
+        assert p.maturity == Maturity.MVP
+        assert p.family == ProtocolFamily.CLINICAL
+        assert p.pipeline_profile == "narrative_review"
+        assert p.skips_experiment_stages is True
+        assert IOType.PDF in p.outputs
+        assert IOType.DOCX in p.outputs
+
 
 # ---------------------------------------------------------------------------
 # Summary table

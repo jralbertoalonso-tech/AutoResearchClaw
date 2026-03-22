@@ -336,6 +336,10 @@ class TestResolveProtocol:
         profile = resolve_protocol(protocol_filename="Analisis_Rapido.md")
         assert profile == ProtocolProfile.NARRATIVE_REVIEW
 
+    def test_consulta_clinica_pico_by_filename(self) -> None:
+        profile = resolve_protocol(protocol_filename="Consulta_Clinica_PICO.md")
+        assert profile == ProtocolProfile.NARRATIVE_REVIEW
+
     def test_registry_match_ignores_topic_text(self) -> None:
         """When registry resolves, topic text is not scanned."""
         profile = resolve_protocol(

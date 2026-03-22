@@ -15,6 +15,9 @@ license = {text = "MIT"}
 [project.optional-dependencies]
 anthropic = ["httpx>=0.24"]
 web = ["scholarly>=1.7", "crawl4ai>=0.2", "tavily-python>=0.3"]
+# Web UI: Gradio interface (web_ui.py).
+# Install with:  pip install "researchclaw[ui]"
+ui = ["gradio>=4.0"]
 pdf = ["PyMuPDF>=1.23"]
 # Multi-format export: Word, PDF (fpdf2), and PowerPoint generation.
 # Install with:  pip install "researchclaw[export]"
@@ -36,6 +39,8 @@ all = [
     "python-docx>=1.1",
     "fpdf2>=2.7",
     "python-pptx>=0.6.21",
+    # ui
+    "gradio>=4.0",
 ]
 dev = ["pytest>=7.0", "httpx>=0.24"]
 

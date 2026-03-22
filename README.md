@@ -87,12 +87,14 @@ The pipeline runs **end-to-end without human intervention**. When experiments fa
 
 ## 🚀 Quick Start
 
+> **Web UI (protocolos clínicos / investigación / ética):** consulta **[QUICKSTART.md](QUICKSTART.md)** para el arranque local con Ollama en dos pasos.
+
 ```bash
 # 1. Clone & install
 git clone https://github.com/aiming-lab/AutoResearchClaw.git
 cd AutoResearchClaw
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e ".[export]"   # añade exportadores PDF, DOCX y PPTX
 
 # 2. Configure
 cp config.researchclaw.example.yaml config.arc.yaml

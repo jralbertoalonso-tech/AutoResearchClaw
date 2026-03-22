@@ -131,6 +131,15 @@ _HARD_SKIP_MARKERS: list[tuple[str, ProtocolProfile]] = [
     ("revisión bibliográfica",  ProtocolProfile.NARRATIVE_REVIEW),
     ("revision bibliografica",  ProtocolProfile.NARRATIVE_REVIEW),
     ("bibliographic review",    ProtocolProfile.NARRATIVE_REVIEW),
+    # Análisis Rápido / Fast Evidence Review — preamble injected by web_ui.py
+    # The Analisis_Rapido.md template starts with
+    # "# Protocolo: Análisis Rápido (Fast Evidence Review)" so any of these
+    # substrings will appear in full_topic when that protocol is selected.
+    ("análisis rápido",         ProtocolProfile.NARRATIVE_REVIEW),
+    ("analisis rapido",         ProtocolProfile.NARRATIVE_REVIEW),
+    ("fast evidence review",    ProtocolProfile.NARRATIVE_REVIEW),
+    ("rapid evidence review",   ProtocolProfile.NARRATIVE_REVIEW),
+    ("análisis de evidencia",   ProtocolProfile.NARRATIVE_REVIEW),
     # Generic bibliographic keywords
     ("systematic literature",   ProtocolProfile.SYSTEMATIC_REVIEW_PRISMA),
     ("evidence synthesis",      ProtocolProfile.SYSTEMATIC_REVIEW_PRISMA),

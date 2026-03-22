@@ -7983,18 +7983,46 @@ def _execute_paper_draft(
                     "Summarise the available literature evidence from the context. "
                     "Acknowledge where evidence is limited.\n"
                 )
+            elif _has_lit_data:
+                # Has substantial literature/synthesis data but the topic text
+                # does not contain an explicit review keyword (e.g. a clinical
+                # question like "efficacy of curcumin in pediatric UC" run under
+                # a bibliographic protocol).  Allow paper drafting with a
+                # conservative no-experiment instruction.  The fabrication guard
+                # remains: no experiment results can be invented.
+                logger.info(
+                    "Stage 17: no review keyword in topic but substantial "
+                    "literature data present (%d chars) — proceeding with "
+                    "bibliographic-mode instruction [domain=%s].",
+                    len(_synthesis_text) or len(_knowledge_text),
+                    _domain_name,
+                )
+                exp_metrics_instruction = (
+                    "\n\nIMPORTANT — BIBLIOGRAPHIC MODE (no experiment): "
+                    "This paper synthesises evidence from the collected literature. "
+                    "DO NOT invent experimental results, metrics, or datasets. "
+                    "The 'Results' section must reflect findings from the real "
+                    "studies identified during literature collection. "
+                    "Cite each source with (Author et al., Year) notation.\n"
+                )
             else:
+                # Neither review signal NOR literature data available.
+                # Blocking is correct: writing a paper without any real data
+                # would require fabrication.
                 logger.error(
-                    "BLOCKED: Cannot write paper — experiment produced NO metrics. "
+                    "BLOCKED: Cannot write paper — experiment produced NO metrics "
+                    "and no literature synthesis data is available. "
                     "The pipeline will not fabricate results."
                 )
                 (stage_dir / "paper_draft.md").write_text(
                     "# Paper Draft Blocked\n\n"
                     "**Reason**: Experiment stage produced no metrics "
-                    "(status: failed/timeout). "
-                    "Cannot write a paper without real experimental data.\n\n"
+                    "(status: failed/timeout) and no literature synthesis "
+                    "data was found. "
+                    "Cannot write a paper without real data.\n\n"
                     "**Action Required**: Fix experiment execution or increase "
-                    "time_budget_sec.",
+                    "time_budget_sec. For bibliographic protocols, ensure the "
+                    "literature search stages (3-6) completed successfully.",
                     encoding="utf-8",
                 )
                 return StageResult(

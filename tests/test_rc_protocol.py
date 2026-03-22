@@ -106,6 +106,61 @@ class TestDetectProtocolHardSkip:
         profile = detect_protocol("Cochrane review of antidepressants", None)
         assert profile == ProtocolProfile.SYSTEMATIC_REVIEW_PRISMA
 
+    # ── Análisis Rápido preamble markers (regression tests for Stage-17 bug) ─
+
+    def test_analisis_rapido_preamble_via_full_topic(self) -> None:
+        """The Analisis_Rapido.md template preamble is injected into full_topic
+        by web_ui.py.  detect_protocol Pass 1 must recognise it as NARRATIVE_REVIEW
+        so Stage 17 does not block paper writing for clinical questions that lack
+        explicit review keywords in the user topic (e.g. 'curcumin in pediatric UC').
+        """
+        # Mirrors what config.research.topic looks like after web_ui injection:
+        # "# Protocolo: Análisis Rápido (Fast Evidence Review)\n...\n---\n<user idea>"
+        preamble = (
+            "# Protocolo: Análisis Rápido (Fast Evidence Review)\n\n"
+            "## Rol del Agente\n"
+            "Actúas como analista de inteligencia científica.\n\n"
+            "---\n\n"
+        )
+        clinical_topic = "efficacy and safety of curcumin and Qing Dai in pediatric ulcerative colitis"
+        full  = preamble + clinical_topic
+        clean = clinical_topic
+
+        profile = detect_protocol(full, clean)
+        assert is_bibliographic(profile), (
+            f"Expected bibliographic profile for Análisis Rápido preamble, got {profile!r}"
+        )
+        assert profile == ProtocolProfile.NARRATIVE_REVIEW
+
+    def test_analisis_rapido_espanol_marker(self) -> None:
+        """'análisis rápido' alone triggers NARRATIVE_REVIEW."""
+        profile = detect_protocol("análisis rápido de evidencia sobre curcumina", None)
+        assert profile == ProtocolProfile.NARRATIVE_REVIEW
+
+    def test_fast_evidence_review_marker(self) -> None:
+        """English subtitle variant triggers NARRATIVE_REVIEW."""
+        profile = detect_protocol("Fast Evidence Review of herbal therapies", None)
+        assert profile == ProtocolProfile.NARRATIVE_REVIEW
+
+    def test_rapid_evidence_review_marker(self) -> None:
+        """Registry name_en variant triggers NARRATIVE_REVIEW."""
+        profile = detect_protocol("Rapid Evidence Review on pediatric IBD", None)
+        assert profile == ProtocolProfile.NARRATIVE_REVIEW
+
+    def test_clinical_topic_alone_stays_generic(self) -> None:
+        """A bare clinical question without any preamble or review keyword should
+        NOT be misclassified as bibliographic — detect_protocol returns GENERIC.
+        (The bypass in executor.py Stage 17 handles this via _has_lit_data instead.)
+        """
+        profile = detect_protocol(
+            "curcumin and Qing Dai in pediatric ulcerative colitis",
+            "curcumin and Qing Dai in pediatric ulcerative colitis",
+        )
+        # GENERIC is the expected fallback — the executor _has_lit_data branch
+        # handles the actual bypass, not this function.
+        assert profile == ProtocolProfile.GENERIC
+        assert not is_bibliographic(profile)
+
 
 # ---------------------------------------------------------------------------
 # detect_protocol: soft-detect path (clean topic only)

@@ -664,13 +664,33 @@ def _email_configured() -> bool:
     return bool(_ENV_EMAIL_USER and _ENV_EMAIL_PASS)
 
 
+def _email_effective_dest(dest: str) -> str:
+    """Resolve the effective destination email.
+
+    Priority: explicit dest arg → EMAIL_DESTINO from .env → EMAIL_USER from .env.
+    This lets the user omit EMAIL_DESTINO and have mail sent to themselves.
+    """
+    return dest.strip() or _ENV_EMAIL_DESTINO or _ENV_EMAIL_USER
+
+
 def _email_status_html(dest: str = "") -> str:
     """Devuelve el HTML del aviso de estado del correo para la UI."""
     if _email_configured():
-        dest_display = f"<strong>{dest.strip()}</strong>" if dest.strip() else "<em>(introduce un email de destino abajo)</em>"
+        effective = _email_effective_dest(dest)
+        dest_display = (
+            f"<strong>{effective}</strong>"
+            if effective
+            else "<em>(introduce un email de destino abajo)</em>"
+        )
+        fallback_note = (
+            ""
+            if dest.strip() or not _ENV_EMAIL_USER
+            else f" <small style='color:#6b7280'>(usando EMAIL_USER como destino)</small>"
+        )
         return (
             "<small style='color:#16a34a'>"
             f"✅ Servidor SMTP configurado — se enviará a {dest_display} al finalizar."
+            f"{fallback_note}"
             "</small>"
         )
     return (
@@ -695,7 +715,8 @@ def _email_status_html(dest: str = "") -> str:
         "<code style='background:#fde68a;color:#1c1917;padding:1px 4px;"
         "border-radius:3px'>EMAIL_PASS=contraseña_de_aplicación</code><br>"
         "<code style='background:#fde68a;color:#1c1917;padding:1px 4px;"
-        "border-radius:3px'>EMAIL_DESTINO=destino@gmail.com</code><br>"
+        "border-radius:3px'>EMAIL_DESTINO=otro@ejemplo.com</code>"
+        " <em style='color:#6b7280'>(opcional — omítelo para enviarte a ti mismo)</em><br>"
         "<span style='color:#44403c'>Reinicia la app tras guardar.</span>"
         "</small>"
         "</div>"
@@ -719,10 +740,21 @@ def _send_email_results(
       - Los documentos médicos subidos por el usuario NO se adjuntan.
       - Las credenciales nunca se escriben en logs ni en disco.
     """
-    if not dest_email.strip() or not smtp_user.strip() or not smtp_pass.strip():
+    # Resolve effective destination: explicit UI field → EMAIL_DESTINO → EMAIL_USER
+    effective_dest = _email_effective_dest(dest_email)
+
+    if not effective_dest or not smtp_user.strip() or not smtp_pass.strip():
+        missing = []
+        if not smtp_user.strip():
+            missing.append("EMAIL_USER")
+        if not smtp_pass.strip():
+            missing.append("EMAIL_PASS")
+        if not effective_dest:
+            missing.append("email de destino (campo UI o EMAIL_DESTINO)")
         return False, (
-            "⚠️ Configura tu archivo .env para recibir correos automáticos. "
-            "(EMAIL_USER, EMAIL_PASS y EMAIL_DESTINO deben estar rellenos)"
+            "⚠️ Correo no enviado — faltan credenciales: "
+            + ", ".join(missing)
+            + ". Completa el archivo .env y reinicia la app."
         )
 
     # Resolver host/puerto SMTP
@@ -740,7 +772,7 @@ def _send_email_results(
     # Construir mensaje
     msg = email.mime.multipart.MIMEMultipart()
     msg["From"]    = smtp_user.strip()
-    msg["To"]      = dest_email.strip()
+    msg["To"]      = effective_dest
     msg["Subject"] = f"ResearchClaw — Investigación finalizada{' · ' + run_id if run_id else ''}"
 
     body = (
@@ -779,8 +811,8 @@ def _send_email_results(
             server.starttls()
             server.ehlo()
             server.login(smtp_user.strip(), smtp_pass)
-            server.sendmail(smtp_user.strip(), dest_email.strip(), msg.as_string())
-        return True, f"📧 Correo enviado a {dest_email} con: {', '.join(attached)}"
+            server.sendmail(smtp_user.strip(), effective_dest, msg.as_string())
+        return True, f"📧 Correo enviado a {effective_dest} con: {', '.join(attached)}"
     except smtplib.SMTPAuthenticationError:
         return False, (
             "❌ Email: error de autenticación. Para Gmail usa una "
@@ -1824,7 +1856,8 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
                 dest_email_box = gr.Textbox(
                     label="📨 Email de destino",
                     placeholder="destinatario@ejemplo.com",
-                    value=_ENV_EMAIL_DESTINO,
+                    value=_ENV_EMAIL_DESTINO or _ENV_EMAIL_USER,  # fallback to sender
+                    info="Si lo dejas igual que tu EMAIL_USER, el correo te llega a ti.",
                     scale=1,
                 )
             with gr.Row(visible=False) as smtp_custom_row:

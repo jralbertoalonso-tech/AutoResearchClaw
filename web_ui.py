@@ -126,6 +126,46 @@ presentaciones y materiales para pacientes.
 """
 
 # ---------------------------------------------------------------------------
+# Prompts de idioma de salida
+# ---------------------------------------------------------------------------
+
+_LANGUAGE_PROMPTS: dict[str, str] = {
+    "Español": (
+        "[IDIOMA DE SALIDA: ESPAÑOL]\n\n"
+        "INSTRUCCIÓN OBLIGATORIA: TODO el contenido generado — incluyendo título, "
+        "abstract, secciones, tablas, conclusiones y presentaciones — DEBE estar "
+        "íntegramente en español. No mezcles idiomas. Si citas un título de "
+        "artículo en inglés, tradúcelo entre corchetes.\n\n"
+    ),
+    "English": (
+        "[OUTPUT LANGUAGE: ENGLISH]\n\n"
+        "MANDATORY INSTRUCTION: ALL generated content — including title, abstract, "
+        "sections, tables, conclusions, and presentations — MUST be entirely in "
+        "English. Do not mix languages.\n\n"
+    ),
+    "Bilingüe": "",  # sin restricción — el modelo elige según contexto
+}
+
+
+def _is_paper_degraded(paper_md: str) -> bool:
+    """Detect whether a paper was produced in degraded mode.
+
+    Returns True if the paper contains degraded-mode markers that indicate
+    the quality gate failed and the output should NOT be treated as final.
+    """
+    _DEGRADED_MARKERS = (
+        "produced in degraded mode",
+        "Title Generation Failed",
+        "Manual Title Required",
+        "Quality gate score (0/",
+        "quality gate score (0/",
+        "replaced with `---`",
+        "replaced with ---",
+        "replaced with --",
+    )
+    return any(marker in paper_md for marker in _DEGRADED_MARKERS)
+
+# ---------------------------------------------------------------------------
 # Helpers de Ollama
 # ---------------------------------------------------------------------------
 
@@ -805,11 +845,22 @@ def _build_pptx(
     audience: str,
     guardrails_on: bool,
 ) -> Path | None:
-    """Lee el paper final y genera el .pptx en deliverables/."""
+    """Lee el paper final y genera el .pptx en deliverables/.
+
+    Returns None (skipping generation) if the paper is in degraded mode.
+    """
     paper_path = _find_paper_md(run_dir)
     if not paper_path:
         return None
     paper_md = paper_path.read_text(encoding="utf-8", errors="replace")
+
+    # Guard: do not generate a presentation from a degraded paper
+    if _is_paper_degraded(paper_md):
+        print(
+            "[pptx] ⚠️ Paper detectado en modo degradado — "
+            "presentación NO generada para evitar artefactos engañosos."
+        )
+        return None
 
     sources_note = (
         "Fuentes verificadas — ResearchClaw pipeline (PubMed · OpenAlex · ClinicalTrials.gov)"
@@ -1085,6 +1136,7 @@ def run_pipeline(
     n_slides: int,
     audience: str,
     output_formats: list[str] | None = None,
+    output_lang: str = "Español",
     notify_desktop: bool = False,
     notify_email: bool = False,
     dest_email: str = "",
@@ -1158,11 +1210,14 @@ def run_pipeline(
     if protocol_prefix:
         combined = f"{protocol_prefix}\n\n---\n\n{combined}"
 
-    # Prefijos de sistema (orden: confidencialidad → CEIm → guardarraíles)
+    # Prefijos de sistema (orden: confidencialidad → CEIm → guardarraíles → idioma)
     if is_ceim_run:
         combined = _CONFIDENTIALITY_PROMPT + _CEIM_OFFLINE_PROMPT + combined
     if guardrails_on:
         combined = _GUARDRAILS_PROMPT + combined
+    lang_prompt = _LANGUAGE_PROMPTS.get(output_lang, "")
+    if lang_prompt:
+        combined = lang_prompt + combined
 
     # Config temporal con modelo seleccionado
     tmp_config: Path | None = None
@@ -1217,6 +1272,8 @@ def run_pipeline(
         header.append(f"📋 Protocolo: {protocol_file}\n")
     if guardrails_on:
         header.append("🛡️ Guardarraíles Médicos: ACTIVOS\n")
+    if output_lang and output_lang != "Bilingüe":
+        header.append(f"🌐 Idioma de salida: {output_lang}\n")
     if is_ceim_run:
         header.append("🏛️ Modo Auditoría CEIm: ACTIVO (análisis offline — sin búsqueda externa)\n")
         header.append("🔒 Confidencialidad: documentos tratados con protección estricta\n")
@@ -1300,10 +1357,26 @@ def run_pipeline(
 
         # ── PowerPoint (.pptx) ───────────────────────────────────────────
         pptx_path: Path | None = None
+        _paper_degraded = False
         if want_pptx and run_dir:
-            log_lines.append("⚙️ Generando presentación PowerPoint...\n")
-            yield "".join(log_lines), "", btn_hidden, pdf_hidden, docx_hidden, pptx_hidden, poster_hidden, panel_hidden
-            pptx_path = _build_pptx(run_dir, n_slides, audience, guardrails_on)
+            # Pre-check: detect degraded paper before attempting PPT
+            _paper_path = _find_paper_md(run_dir)
+            if _paper_path:
+                _paper_text = _paper_path.read_text(encoding="utf-8", errors="replace")
+                _paper_degraded = _is_paper_degraded(_paper_text)
+            if _paper_degraded:
+                log_lines.append(
+                    "⚠️ Paper en modo degradado (quality gate 0/4.0) — "
+                    "presentación PowerPoint NO generada.\n"
+                    "   Motivo: generar una presentación a partir de un paper degradado "
+                    "produciría diapositivas engañosas sin datos reales.\n"
+                    "   Acción: corrige la ejecución del pipeline y regenera.\n"
+                )
+                yield "".join(log_lines), "", btn_hidden, pdf_hidden, docx_hidden, pptx_hidden, poster_hidden, panel_hidden
+            else:
+                log_lines.append("⚙️ Generando presentación PowerPoint...\n")
+                yield "".join(log_lines), "", btn_hidden, pdf_hidden, docx_hidden, pptx_hidden, poster_hidden, panel_hidden
+                pptx_path = _build_pptx(run_dir, n_slides, audience, guardrails_on)
             if pptx_path:
                 log_lines.append(f"✅ PowerPoint listo: {pptx_path.name}\n")
                 generated_files.append(pptx_path)
@@ -1678,6 +1751,16 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         ),
     )
 
+    output_lang_dropdown = gr.Dropdown(
+        label="🌐 Idioma de salida",
+        choices=["Español", "English", "Bilingüe"],
+        value="Español",
+        info=(
+            "El manuscrito, abstract, conclusiones y presentación se generarán "
+            "en el idioma seleccionado. 'Bilingüe' deja al modelo elegir."
+        ),
+    )
+
     # ── ☁️ Modelos Cloud ──────────────────────────────────────────────────
     with gr.Accordion("☁️ Modelos Cloud (OpenAI · Anthropic · Google)", open=False):
         gr.Markdown(
@@ -2023,7 +2106,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
     # ── Eventos ───────────────────────────────────────────────────────────
 
     def _on_start(
-        idea, files, protocol, model, guardrails, n_slides, audience,
+        idea, files, protocol, model, guardrails, lang, n_slides, audience,
         formats, do_notify, do_email, d_email, smtp_pst, smtp_host, s_user, s_pass,
         c_model, c_api_key,
         logo_hosp, logo_univ, logo_cong,
@@ -2034,6 +2117,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
             idea, files, eff_protocol, eff_model,
             guardrails, n_slides, audience,
             output_formats=formats or [],
+            output_lang=lang or "Español",
             notify_desktop=do_notify,
             notify_email=do_email,
             dest_email=d_email,
@@ -2052,7 +2136,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         fn=_on_start,
         inputs=[
             idea_box, file_upload, protocol_dropdown, model_dropdown,
-            guardrails_toggle, slides_slider, audience_dropdown,
+            guardrails_toggle, output_lang_dropdown, slides_slider, audience_dropdown,
             format_group,
             notify_toggle, email_toggle,
             dest_email_box, smtp_preset_dd, smtp_host_box,

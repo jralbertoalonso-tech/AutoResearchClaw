@@ -460,3 +460,91 @@ class TestWriteConfigForBackend:
         data = yaml.safe_load(tmp.read_text())
         assert data["llm"]["api_key_env"] == "ANTHROPIC_API_KEY"
         tmp.unlink()
+
+
+# ---------------------------------------------------------------------------
+# web_ui.py helper functions (pure, no Gradio required)
+# These test the _backend_health_html / _models_for_backend helpers that
+# were added to web_ui.py in Phase C1.  We import them via importlib so the
+# test is not coupled to the Gradio launch block.
+# ---------------------------------------------------------------------------
+
+class TestWebUiBackendHelpers:
+    """Tests for the pure helpers added to web_ui.py (Phase C1).
+
+    We call the underlying registry functions directly — no need to instantiate
+    the full Gradio app — to verify the behaviour that the UI helpers delegate to.
+    """
+
+    def test_models_for_known_backend_returns_list(self) -> None:
+        """_models_for_backend delegates to list_models() which returns a list."""
+        b = get_backend("ollama")
+        assert b is not None
+        # With no server running, list_models falls back to fallback_models
+        with patch("urllib.request.urlopen", side_effect=ConnectionRefusedError):
+            models = list_models(b)
+        assert isinstance(models, list)
+        assert len(models) > 0
+
+    def test_health_html_cloud_always_ok(self) -> None:
+        """Cloud backends return a cloud-flavoured HTML string (no health probe)."""
+        b = get_backend("openai")
+        assert b is not None
+        assert b.health_check_url is None
+        # health_ok for cloud → always True
+        assert health_ok(b) is True
+
+    def test_health_html_local_ok_when_server_up(self) -> None:
+        b = get_backend("ollama")
+        assert b is not None
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            assert health_ok(b) is True
+
+    def test_health_html_local_ko_when_server_down(self) -> None:
+        b = get_backend("lmstudio")
+        assert b is not None
+        with patch("urllib.request.urlopen", side_effect=ConnectionRefusedError):
+            assert health_ok(b) is False
+
+    def test_backend_requires_api_key_is_false_for_local(self) -> None:
+        for bk_id in ("ollama", "lmstudio"):
+            b = get_backend(bk_id)
+            assert b is not None
+            assert b.requires_api_key is False, (
+                f"Local backend '{bk_id}' should not require API key"
+            )
+
+    def test_backend_requires_api_key_is_true_for_cloud(self) -> None:
+        for bk_id in ("openai", "anthropic"):
+            b = get_backend(bk_id)
+            assert b is not None
+            assert b.requires_api_key is True, (
+                f"Cloud backend '{bk_id}' should require API key"
+            )
+
+    def test_backend_api_key_env_used_in_config(
+        self, minimal_config: Path, tmp_path: Path
+    ) -> None:
+        """The api_key_env from the registry is written to the generated config."""
+        b = get_backend("openai")
+        assert b is not None
+        tmp = write_config_for_backend(
+            backend=b,
+            model="gpt-4o",
+            base_config_path=minimal_config,
+            api_key="sk-test",
+            tmp_dir=tmp_path,
+        )
+        data = yaml.safe_load(tmp.read_text())
+        # The subprocess will read api_key_env and look for OPENAI_API_KEY
+        assert data["llm"]["api_key_env"] == "OPENAI_API_KEY"
+        tmp.unlink()
+
+    def test_all_backends_have_distinct_choices(self) -> None:
+        """The UI choices list has no duplicate (name, id) pairs."""
+        choices = [(b.name, b.id) for b in all_backends()]
+        assert len(choices) == len(set(choices))

@@ -63,6 +63,13 @@ from researchclaw.protocol_registry import (
     ProtocolFamily as _PFamily,
     get_by_filename as _get_proto_by_filename,
 )
+from researchclaw.inference_backends import (
+    all_backends as _all_backends,
+    get_backend as _get_backend,
+    health_ok as _health_ok,
+    list_models as _list_models,
+    write_config_for_backend as _write_config_for_backend,
+)
 
 # Legacy constants — kept for backward compat in run_pipeline() where the
 # pipeline still receives raw filenames.  New UI helpers use the registry.
@@ -1178,6 +1185,8 @@ def run_pipeline(
     smtp_pass: str = "",
     cloud_model: str = "",
     cloud_api_key: str = "",
+    backend_id: str = "",
+    backend_api_key: str = "",
     poster_logo_hospital: str | None = None,
     poster_logo_university: str | None = None,
     poster_logo_congress: str | None = None,
@@ -1254,10 +1263,32 @@ def run_pipeline(
     # Config temporal con modelo seleccionado
     tmp_config: Path | None = None
     _using_cloud = bool(cloud_model and cloud_model != "(Ninguno)" and cloud_api_key.strip())
+    _using_backend = bool(backend_id and backend_id not in ("", "(Auto)"))
     effective_model = model if model and model != "(Predeterminado)" else None
 
-    if _using_cloud:
-        # Cloud model overrides local model
+    if _using_backend and CONFIG_YAML.exists():
+        # ── New path: backend registry → write_config_for_backend ─────────
+        _bk = _get_backend(backend_id)
+        if _bk:
+            _bk_model = effective_model or (
+                _list_models(_bk)[0] if _list_models(_bk) else ""
+            )
+            try:
+                tmp_config = _write_config_for_backend(
+                    backend=_bk,
+                    model=_bk_model,
+                    base_config_path=CONFIG_YAML,
+                    api_key=backend_api_key,
+                )
+            except Exception as exc:
+                yield _idle(
+                    f"⚠️ No se pudo crear config para backend '{_bk.name}': {exc}\n"
+                    "Continuando con config.yaml original...\n"
+                )
+        else:
+            yield _idle(f"⚠️ Backend '{backend_id}' desconocido — usando config.yaml original.\n")
+    elif _using_cloud:
+        # ── Legacy path: cloud model + explicit API key ────────────────────
         try:
             tmp_config = _write_cloud_config(cloud_model, cloud_api_key)
         except Exception as exc:
@@ -1266,6 +1297,7 @@ def run_pipeline(
                 "Continuando con config.yaml original...\n"
             )
     elif effective_model:
+        # ── Legacy path: local Ollama model ───────────────────────────────
         try:
             tmp_config = _write_temp_config(effective_model)
         except Exception as exc:
@@ -1281,8 +1313,13 @@ def run_pipeline(
         cmd += ["--config", str(tmp_config)]
 
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    # Inject cloud API key into subprocess environment
-    if _using_cloud:
+    # Inject API key into subprocess environment
+    if _using_backend and backend_api_key.strip():
+        _bk2 = _get_backend(backend_id)
+        if _bk2:
+            env[_bk2.api_key_env] = backend_api_key.strip()
+    elif _using_cloud:
+        # Legacy cloud key injection
         provider_key, _ = _cloud_provider_cfg(cloud_model)
         if provider_key == "openai":
             env["OPENAI_API_KEY"] = cloud_api_key.strip()
@@ -1295,7 +1332,11 @@ def run_pipeline(
 
     # Cabecera de inicio
     header: list[str] = ["🚀 Iniciando pipeline ResearchClaw...\n"]
-    if _using_cloud:
+    if _using_backend:
+        _bk3 = _get_backend(backend_id)
+        _bk_label = _bk3.name if _bk3 else backend_id
+        header.append(f"🖥️ Backend: {_bk_label} · Modelo: {effective_model or '(auto)'}\n")
+    elif _using_cloud:
         provider_label = _CLOUD_PROVIDER_LABELS.get(cloud_model, "Cloud")
         header.append(f"☁️ Modelo cloud: {cloud_model} ({provider_label})\n")
     elif effective_model:
@@ -1693,6 +1734,40 @@ _ollama_detected = _ollama_models()
 print(f"✅ MODELOS OLLAMA CARGADOS: {_ollama_detected}")
 
 _MODELS    = ["(Predeterminado)"] + _ollama_detected
+
+# ── Backend selector helpers ──────────────────────────────────────────────
+# Build choices list for the backend dropdown from the registry.
+_BACKEND_CHOICES: list[tuple[str, str]] = [
+    (b.name, b.id) for b in _all_backends()
+]
+_DEFAULT_BACKEND_ID = "ollama"  # Pre-select Ollama on startup
+
+
+def _backend_health_html(backend_id: str) -> str:
+    """Return a small HTML health indicator for the given backend."""
+    b = _get_backend(backend_id)
+    if b is None:
+        return "<small style='color:#6b7280'>Backend desconocido.</small>"
+    if b.health_check_url is None:
+        return "<small style='color:#6b7280'>☁️ Backend cloud — sin health check local.</small>"
+    ok = _health_ok(b)
+    if ok:
+        return (
+            f"<small style='color:#16a34a'>🟢 <strong>{b.name}</strong> disponible.</small>"
+        )
+    return (
+        f"<small style='color:#dc2626'>🔴 <strong>{b.name}</strong> no responde en "
+        f"<code>{b.health_check_url}</code> — ¿está activo?</small>"
+    )
+
+
+def _models_for_backend(backend_id: str) -> list[str]:
+    """Return the model list for the given backend id (with fallback)."""
+    b = _get_backend(backend_id)
+    if b is None:
+        return _ollama_detected or ["(Predeterminado)"]
+    models = _list_models(b)
+    return models if models else list(b.fallback_models)
 _NONE_CHOICE = "(Ninguno)"
 _PROTOCOLS = [(_NONE_CHOICE, _NONE_CHOICE)] + _protocol_choices()
 
@@ -1735,11 +1810,34 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
     # ── SECCIÓN 1: Configuración ──────────────────────────────────────────
     gr.Markdown("### ⚙️ Configuración del Laboratorio", elem_classes="section-header")
 
+    # ── Backend selector (Phase C1) ───────────────────────────────────────
+    _initial_backend_models = _models_for_backend(_DEFAULT_BACKEND_ID)
+    with gr.Row(equal_height=True):
+        backend_dropdown = gr.Dropdown(
+            label="🖥️ Backend de Inferencia",
+            choices=_BACKEND_CHOICES,
+            value=_DEFAULT_BACKEND_ID,
+            scale=2,
+            info="Ollama/LM Studio → local · OpenAI/Anthropic → cloud",
+        )
+        backend_api_key_box = gr.Textbox(
+            label="🔑 API Key del Backend",
+            placeholder="sk-... · sk-ant-... · (vacío para backends locales)",
+            type="password",
+            visible=False,   # shown dynamically when backend.requires_api_key
+            scale=2,
+            info="Solo necesaria para backends cloud. No se almacena en disco.",
+        )
+        backend_health_html = gr.HTML(
+            value=_backend_health_html(_DEFAULT_BACKEND_ID),
+            label="",
+        )
+
     with gr.Row(equal_height=True):
         model_dropdown = gr.Dropdown(
-            label="🧠 Cerebro (Modelo Ollama)",
-            choices=_MODELS,
-            value=_MODELS[1] if len(_MODELS) > 1 else _MODELS[0],
+            label="🧠 Cerebro (Modelo)",
+            choices=_initial_backend_models,
+            value=_initial_backend_models[0] if _initial_backend_models else "(Predeterminado)",
             scale=3,
         )
         refresh_models_btn = gr.Button(
@@ -2142,6 +2240,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         idea, files, protocol, model, guardrails, lang, n_slides, audience,
         formats, do_notify, do_email, d_email, smtp_pst, smtp_host, s_user, s_pass,
         c_model, c_api_key,
+        bk_id, bk_api_key,
         logo_hosp, logo_univ, logo_cong,
     ):
         eff_protocol = None if protocol in (None, _NONE_CHOICE) else protocol
@@ -2160,6 +2259,8 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
             smtp_pass=s_pass,
             cloud_model=c_model or "",
             cloud_api_key=c_api_key or "",
+            backend_id=bk_id or "",
+            backend_api_key=bk_api_key or "",
             poster_logo_hospital=logo_hosp,
             poster_logo_university=logo_univ,
             poster_logo_congress=logo_cong,
@@ -2175,6 +2276,7 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
             dest_email_box, smtp_preset_dd, smtp_host_box,
             smtp_user_box, smtp_pass_box,
             cloud_model_dd, cloud_api_key_box,
+            backend_dropdown, backend_api_key_box,
             logo_hospital_img, logo_university_img, logo_congress_img,
         ],
         outputs=[
@@ -2218,14 +2320,15 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
         outputs=[idea_box],
     )
 
-    # Refresco dinámico de modelos Ollama + reset de outputs
-    def _refresh_models():
-        detected = _ollama_models()
-        print(f"🔄 Refresco — Modelos detectados: {detected}")
-        choices = ["(Predeterminado)"] + detected
-        default = choices[1] if len(choices) > 1 else choices[0]
+    # Refresco dinámico de modelos + reset de outputs
+    def _refresh_models(bk_id: str = ""):
+        models = _models_for_backend(bk_id) if bk_id else (
+            ["(Predeterminado)"] + _ollama_models()
+        )
+        print(f"🔄 Refresco — backend={bk_id!r} modelos={models[:3]}")
+        default = models[0] if models else "(Predeterminado)"
         return (
-            gr.update(choices=choices, value=default),  # model_dropdown
+            gr.update(choices=models, value=default),    # model_dropdown
             "",                                          # logs_box
             "",                                          # result_md
             gr.update(visible=False),                    # open_btn
@@ -2238,12 +2341,32 @@ with gr.Blocks(title="ResearchClaw — Laboratorio de IA") as app:
 
     refresh_models_btn.click(
         fn=_refresh_models,
-        inputs=[],
+        inputs=[backend_dropdown],
         outputs=[
             model_dropdown, logs_box, result_md, open_btn,
             pdf_download, docx_download, pptx_download, poster_download,
             summary_panel,
         ],
+    )
+
+    # ── Backend selector event handlers (Phase C1) ─────────────────────────
+    def _on_backend_change(bk_id: str):
+        """When backend changes: refresh models, show/hide API key, update health."""
+        b = _get_backend(bk_id)
+        models = _models_for_backend(bk_id)
+        default_model = models[0] if models else ""
+        show_key = b.requires_api_key if b else False
+        health = _backend_health_html(bk_id)
+        return (
+            gr.update(choices=models, value=default_model),  # model_dropdown
+            gr.update(visible=show_key),                      # backend_api_key_box
+            gr.update(value=health),                          # backend_health_html
+        )
+
+    backend_dropdown.change(
+        fn=_on_backend_change,
+        inputs=[backend_dropdown],
+        outputs=[model_dropdown, backend_api_key_box, backend_health_html],
     )
 
     # Actualizar estado del email cuando cambia el destinatario

@@ -2428,6 +2428,35 @@ def _execute_literature_screen(
         topic_keywords[:8],
     )
 
+    # ── Local-model context cap (Stage 05) ───────────────────────────────────
+    # candidates_text can reach 50-100 KB for broad topics.  Cloud models handle
+    # that fine; Ollama/LM-Studio local models risk an inference timeout in the
+    # json_mode screening call.  Cap input to 30 000 chars (≈ 7 500 tokens) by
+    # dropping trailing candidates — the LLM fallback below re-adds the minimum
+    # 15-paper shortlist from filtered_rows if the LLM returns nothing.
+    if llm is not None:
+        _model_5 = getattr(getattr(llm, "config", None), "primary_model", "") or ""
+        _CLOUD_PREFIXES_5 = ("gpt-", "o3", "o4", "claude", "gemini", "mistral-large")
+        _is_local_5 = not any(_model_5.startswith(p) for p in _CLOUD_PREFIXES_5)
+        if _is_local_5:
+            _MAX_CAND_CHARS = 30_000
+            if len(candidates_text) > _MAX_CAND_CHARS:
+                _cand_lines = candidates_text.splitlines()
+                _kept_5: list[str] = []
+                _tot_5 = 0
+                for _ln in _cand_lines:
+                    if _tot_5 + len(_ln) + 1 > _MAX_CAND_CHARS:
+                        break
+                    _kept_5.append(_ln)
+                    _tot_5 += len(_ln) + 1
+                candidates_text = "\n".join(_kept_5)
+                logger.info(
+                    "Stage 05: local model '%s' — candidates_text capped to "
+                    "%d entries / %d chars (had %d entries)",
+                    _model_5, len(_kept_5), _tot_5, len(_cand_lines),
+                )
+    # ─────────────────────────────────────────────────────────────────────────
+
     shortlist: list[dict[str, Any]] = []
     if llm is not None:
         _pm = prompts or PromptManager()
@@ -2605,6 +2634,29 @@ def _execute_knowledge_extract(
         shortlist = shortlist + "\n\n--- Web Search Context ---\n" + web_context[:10_000]
     if _smart_citation_context:
         shortlist = shortlist + _smart_citation_context
+
+    # ── Local-model context cap (Stage 06) ───────────────────────────────────
+    # shortlist after web_context + smart-citation injection can exceed 50 KB.
+    # For local Ollama models the combined prompt (input + json output) must fit
+    # inside the model context window.  Hard-cap at 30 000 chars; the template
+    # fallback below produces usable cards from the raw shortlist if the LLM
+    # returns nothing or malformed JSON.
+    if llm is not None:
+        _model_6 = getattr(getattr(llm, "config", None), "primary_model", "") or ""
+        _CLOUD_PREFIXES_6 = ("gpt-", "o3", "o4", "claude", "gemini", "mistral-large")
+        _is_local_6 = not any(_model_6.startswith(p) for p in _CLOUD_PREFIXES_6)
+        if _is_local_6:
+            _MAX_KE_CHARS = 30_000
+            if len(shortlist) > _MAX_KE_CHARS:
+                shortlist = (
+                    shortlist[:_MAX_KE_CHARS]
+                    + "\n\n[... truncated for local model context budget ...]"
+                )
+                logger.info(
+                    "Stage 06: local model '%s' — shortlist context capped to ~%d chars",
+                    _model_6, _MAX_KE_CHARS,
+                )
+    # ─────────────────────────────────────────────────────────────────────────
 
     cards_dir = stage_dir / "cards"
     cards_dir.mkdir(parents=True, exist_ok=True)
@@ -8548,14 +8600,47 @@ def _execute_peer_review(
             experiment_evidence=experiment_evidence,
         )
         _review_user = sp.user + _quality_suffix
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            _review_user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
-        reviews = resp.content
+        try:
+            resp = _chat_with_prompt(
+                llm,
+                sp.system,
+                _review_user,
+                json_mode=sp.json_mode,
+                max_tokens=sp.max_tokens,
+            )
+            reviews = resp.content
+        except Exception as _pr_exc:  # noqa: BLE001
+            # Graceful fallback: PEER_REVIEW is expensive (full draft as input).
+            # On local backends it is the most timeout-prone stage.  Rather than
+            # killing the entire run when paper_draft.md already exists, we write
+            # a clearly-marked placeholder and let PAPER_REVISION proceed.
+            logger.warning(
+                "Stage 18 (PEER_REVIEW): LLM call failed (%s). "
+                "Writing fallback reviews.md — run continues with paper_draft.md "
+                "as provisional deliverable.",
+                _pr_exc,
+            )
+            reviews = (
+                "# Peer Review\n\n"
+                "> **⚠ Automated peer review unavailable** — the inference call "
+                "failed (likely timeout on a local model). "
+                "`paper_draft.md` is available as a provisional deliverable.\n\n"
+                "## Reviewer A — Methodology\n"
+                "- **Strengths:** See `paper_draft.md`.\n"
+                "- **Weaknesses:** Review not completed (inference error).\n"
+                "- **Actionable revisions:** Retry with a faster model or increase "
+                "the HTTP timeout; alternatively review the draft manually.\n\n"
+                "## Reviewer B — Domain Expert\n"
+                "- **Strengths:** See `paper_draft.md`.\n"
+                "- **Weaknesses:** Review not completed (inference error).\n"
+                "- **Actionable revisions:** Consider splitting the prompt or "
+                "using a cloud model for this stage.\n\n"
+                "## Reviewer C — Statistics / Rigor\n"
+                "- **Strengths:** See `paper_draft.md`.\n"
+                "- **Weaknesses:** Review not completed (inference error).\n"
+                "- **Actionable revisions:** Manual review recommended before "
+                "submission.\n"
+            )
     else:
         reviews = """# Reviews
 

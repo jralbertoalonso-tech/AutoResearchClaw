@@ -123,6 +123,22 @@ class LLMClient:
             if bridge.fallback_api_key:
                 fallback_api_key = bridge.fallback_api_key
 
+        # Auto-extend HTTP timeout for local backends (Ollama, LM Studio, etc.).
+        # Cloud APIs respond in <30 s; local models on consumer hardware often need
+        # 3-10 min for long-output stages (PEER_REVIEW, PAPER_DRAFT, …).
+        _base_lower = base_url.lower()
+        _is_local_backend = any(
+            marker in _base_lower
+            for marker in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+        )
+        _effective_timeout = 600 if _is_local_backend else 300
+        if _is_local_backend:
+            logger.info(
+                "Local backend detected (%s) — HTTP timeout set to %ds",
+                base_url,
+                _effective_timeout,
+            )
+
         config = LLMConfig(
             base_url=base_url,
             api_key=api_key,
@@ -130,6 +146,7 @@ class LLMClient:
             fallback_models=list(rc_config.llm.fallback_models or []),
             fallback_url=fallback_url,
             fallback_api_key=fallback_api_key,
+            timeout_sec=_effective_timeout,
         )
         client = cls(config)
 
